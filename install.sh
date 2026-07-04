@@ -18,8 +18,7 @@ systemctl start docker
 systemctl enable docker
 
 # Install dependencies
-mkdir -p "/vps"
-cd /vps
+cd /root/bot-cvps #ganti dengan directory source ini.
 npm install
 
 # Build Docker images
