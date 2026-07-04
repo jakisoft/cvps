@@ -7,8 +7,8 @@ const execPromise = util.promisify(exec);
 const os = require("os");
 
 // ============= KONFIGURASI =============
-const TOKEN = "";
-const ADMIN_IDS = [];
+const TOKEN = "8640346901:AAEjNtLYejnHnfocKNalcV1P2jqnbN4eTrc";
+const ADMIN_IDS = ["7285215691"];
 const LOGS_CHANNEL = -92728827282;
 const VERIFY_CHANNEL = "@";
 const FREE_VPS_DURATION = 15 * 60 * 1000;
