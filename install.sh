@@ -18,7 +18,8 @@ systemctl start docker
 systemctl enable docker
 
 # Install dependencies
-cd /nama folder kamu
+mkdir -p "/vps"
+cd /vps
 npm install
 
 # Build Docker images
