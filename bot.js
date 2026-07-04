@@ -1,4 +1,6 @@
 const { Telegraf, Markup } = require("telegraf");
+const settings = require("./settings");
+const OS_OPTIONS = require("./config/os");
 const fs = require("fs").promises;
 const crypto = require("crypto");
 const { exec } = require("child_process");
@@ -6,23 +8,21 @@ const util = require("util");
 const execPromise = util.promisify(exec);
 const os = require("os");
 
-// ============= KONFIGURASI =============
-const TOKEN = "8640346901:AAEjNtLYejnHnfocKNalcV1P2jqnbN4eTrc";
-const ADMIN_IDS = ["7285215691"];
-const LOGS_CHANNEL = -92728827282;
-const VERIFY_CHANNEL = "@";
-const FREE_VPS_DURATION = 15 * 60 * 1000;
-const EXTEND_DURATION = 15 * 60 * 1000;
-const EXTEND_COST = 10;
-const CREATE_VPS_COST = 7;
-const DAILY_REWARD = 3;
-const REFERRAL_BONUS = 3;
-const REFERRAL_BONUS_INCREASE = 3;
+const TOKEN = settings.token;
+const OWNER_ID = String(settings.owner || "");
+const ADMIN_IDS = Array.from(new Set([OWNER_ID, ...(settings.admins || []).map(String)].filter(Boolean)));
+const LOGS_CHANNEL = settings.logsChannel;
+const VERIFY_CHANNEL = settings.verification.channel;
+const FREE_VPS_DURATION = settings.durations.freeVpsMs;
+const EXTEND_DURATION = settings.durations.extendMs;
+const EXTEND_COST = settings.prices.extendCost;
+const CREATE_VPS_COST = settings.prices.createVpsCost;
+const DAILY_REWARD = settings.prices.dailyReward;
+const REFERRAL_BONUS = settings.prices.referralBonus;
+const REFERRAL_BONUS_INCREASE = settings.prices.referralBonusIncrease;
 
-// ============= PROVIDER =============
-const PROVIDER = "☁️ Skynx Cloud System";
+const PROVIDER = settings.provider;
 
-// ============= REGIONS =============
 const REGIONS = {
     singapore: { name: "Singapore", flag: "🇸🇬", code: "sg", location: "1.2897,103.8501", country: "SG", city: "Singapore", timezone: "Asia/Singapore" },
     indonesia: { name: "Indonesia (Jakarta)", flag: "🇮🇩", code: "id", location: "-6.2088,106.8456", country: "ID", city: "Jakarta", timezone: "Asia/Jakarta" },
@@ -31,7 +31,6 @@ const REGIONS = {
     vietnam: { name: "Vietnam (Ho Chi Minh)", flag: "🇻🇳", code: "vn", location: "10.8231,106.6297", country: "VN", city: "Ho Chi Minh", timezone: "Asia/Ho_Chi_Minh" }
 };
 
-// ============= MODULES =============
 const MODULES = {
     nodejs: { name: "Node.js", versions: ["18","20","22"], cmd: (v) => `curl -fsSL https://deb.nodesource.com/setup_${v}.x | bash - && apt install -y nodejs` },
     python: { name: "Python", versions: ["3.10","3.11","3.12"], cmd: (v) => `apt install -y python${v} python${v}-pip` },
@@ -45,29 +44,17 @@ const MODULES = {
     java: { name: "Java", versions: ["11","17","21"], cmd: (v) => `apt install -y openjdk-${v}-jdk` }
 };
 
-// ============= HARGA PREMIUM =============
-const PRICES = { IDR: 5000 };
+const PRICES = { IDR: settings.prices.premiumIdr };
 
-// ============= OS OPTIONS =============
-const OS_OPTIONS = {
-    ubuntu22: { name: "Ubuntu 22.04 LTS", emoji: "🐧", image: "ubuntu-vps:22.04", desc: "Stabil & Terpercaya" },
-    ubuntu24: { name: "Ubuntu 24.04 LTS", emoji: "🐧", image: "ubuntu-vps:24.04", desc: "Versi LTS Terbaru" },
-    debian11: { name: "Debian 11 Bullseye", emoji: "🦕", image: "debian-vps:11", desc: "Stabil & Aman" },
-    debian12: { name: "Debian 12 Bookworm", emoji: "🦕", image: "debian-vps:12", desc: "Stabil Terkini" },
-    debian13: { name: "Debian 13 Trixie", emoji: "🦕", image: "debian-vps:13", desc: "Rilis Uji Coba" }
-};
-
-// ============= TIER CONFIG =============
 const TIERS = {
     FREE: { name: "Free", maxRam: 2, maxCpu: 1, maxDisk: 50, maxVPS: 1, coinCost: CREATE_VPS_COST, antiDDoS: 10, emoji: "🆓", duration: FREE_VPS_DURATION },
     PREMIUM: { name: "Premium", maxRam: 5, maxCpu: 3, maxDisk: 100, maxVPS: 999, coinCost: 0, antiDDoS: 5, emoji: "💎", duration: null },
     OWNER: { name: "Owner", maxRam: 16, maxCpu: 6, maxDisk: 320, maxVPS: 9999, coinCost: 0, antiDDoS: 0, emoji: "👑", duration: null }
 };
 
-const DAILY_COOLDOWN = 24 * 60 * 60 * 1000;
-const VIDEO_LINK = "https://drive.google.com/file/d/196OI5SXLmt8hSOnH-07LXANo3ZVNfuhQ/view?usp=drivesdk";
+const DAILY_COOLDOWN = settings.durations.dailyCooldownMs;
+const VIDEO_LINK = settings.videoLink;
 
-// ============= DATABASE =============
 class Database {
     constructor() {
         this.file = "database.json";
@@ -84,7 +71,7 @@ class Database {
         await fs.writeFile(this.file, JSON.stringify(this.data, null, 2));
     }
     getUser(userId) {
-        const isOwner = ADMIN_IDS.includes(userId);
+        const isOwner = isOwnerUser(userId);
         if (!this.data.users[userId]) {
             this.data.users[userId] = {
                 tier: isOwner ? "OWNER" : "FREE",
@@ -100,7 +87,9 @@ class Database {
                 startedAt: null,
                 lastActivity: null,
                 referralCount: 0,
-                verified: false
+                verified: false,
+                phoneNumber: null,
+                contact: null
             };
             this.save();
         } else {
@@ -122,7 +111,7 @@ class Database {
     }
     async isVerified(userId) {
         const user = this.getUser(userId);
-        return user.verified || ADMIN_IDS.includes(userId);
+        return user.verified || isPrivilegedUser(userId);
     }
     async createVPS(userId, osKey, ram, cpu, disk, tier, region) {
         const vpsId = crypto.randomBytes(8).toString("hex");
@@ -335,70 +324,104 @@ class Database {
     }
 }
 
-// ============= INIT BOT =============
 const db = new Database();
 const bot = new Telegraf(TOKEN);
 
-// ============= MIDDLEWARE VERIFIKASI =============
+function normalizeId(id) { return String(id || ""); }
+function isOwnerUser(id) { return normalizeId(id) === OWNER_ID; }
+function isPrivilegedUser(id) { return ADMIN_IDS.includes(normalizeId(id)); }
+function userRole(id, user) { if (isOwnerUser(id) || user?.tier === "OWNER") return "OWNER"; if (ADMIN_IDS.includes(normalizeId(id))) return "ADMIN"; return user?.tier || "FREE"; }
+function html(lines) { return lines.filter(Boolean).join("\n"); }
+function esc(value) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function divider() { return "<b>━━━━━━━━━━━━━━━━━━━━</b>"; }
+function twoColumnButtons(items) { const rows = []; for (let i = 0; i < items.length; i += 2) rows.push(items.slice(i, i + 2)); return rows; }
+async function sendPage(ctx, text, buttons = []) { const extra = { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) }; if (ctx.updateType === "callback_query") return ctx.editMessageText(text, extra).catch(() => ctx.reply(text, extra)); return ctx.reply(text, extra); }
+async function getOwnerMention(ctx) { try { const chat = await ctx.telegram.getChat(OWNER_ID); if (chat.username) return `@${chat.username}`; const name = [chat.first_name, chat.last_name].filter(Boolean).join(" ") || settings.brandName; return esc(name); } catch { return esc(settings.brandName); } }
+function backButton() { return [Markup.button.callback("⬅️ Kembali", "menu_home")]; }
+
 bot.use(async (ctx, next) => {
-    if (ctx.chat && ctx.chat.type === 'channel') return;
+    if (ctx.chat && ctx.chat.type === "channel") return;
     if (ctx.message && ctx.message.forward_date) return;
-    
+
     const userId = ctx.from?.id;
     if (!userId) return next();
-    
-    if (ADMIN_IDS.includes(userId)) {
-        ctx.user = db.getUser(userId);
-        ctx.userId = userId;
-        ctx.isAdmin = true;
-        return next();
-    }
-    
+
     const user = db.getUser(userId);
-    const isVerified = await db.isVerified(userId);
-    if (!isVerified) {
-        try {
-            const chatMember = await ctx.telegram.getChatMember(VERIFY_CHANNEL, userId);
-            if (chatMember.status === 'member' || chatMember.status === 'administrator' || chatMember.status === 'creator') {
-                await db.verifyUser(userId);
-                await ctx.reply(
-                    `✅ VERIFIKASI BERHASIL!\n\n` +
-                    `Selamat datang di ${PROVIDER}\n` +
-                    `Anda sudah terverifikasi sebagai member.\n\n` +
-                    `Ketik /start untuk mulai menggunakan bot.`
-                );
-                ctx.user = db.getUser(userId);
-                ctx.userId = userId;
-                ctx.isAdmin = false;
-                return next();
-            } else {
-                await ctx.reply(
-                    `❌ VERIFIKASI GAGAL!\n\n` +
-                    `Anda harus join channel/group terlebih dahulu:\n` +
-                    `${VERIFY_CHANNEL}\n\n` +
-                    `Setelah join, ketik /start lagi untuk verifikasi.`
-                );
-                return;
-            }
-        } catch (error) {
-            await ctx.reply(
-                `❌ VERIFIKASI GAGAL!\n\n` +
-                `Terjadi kesalahan saat verifikasi.\n` +
-                `Pastikan Anda sudah join:\n` +
-                `${VERIFY_CHANNEL}\n\n` +
-                `Ketik /start lagi setelah join.`
-            );
-            return;
-        }
-    }
-    
+    const role = userRole(userId, user);
     ctx.user = user;
     ctx.userId = userId;
-    ctx.isAdmin = ADMIN_IDS.includes(userId);
-    await next();
+    ctx.isAdmin = role === "OWNER" || role === "ADMIN";
+    ctx.role = role;
+
+    if (ctx.isAdmin) return next();
+    if (!settings.verification.enabled) {
+        user.verified = true;
+        await db.save();
+        return next();
+    }
+
+    const hasContact = !settings.verification.requireContact || Boolean(user.phoneNumber);
+    let hasJoined = true;
+
+    if (settings.verification.requireChannelJoin) {
+        try {
+            const member = await ctx.telegram.getChatMember(VERIFY_CHANNEL, userId);
+            hasJoined = ["creator", "administrator", "member"].includes(member.status);
+        } catch {
+            hasJoined = false;
+        }
+    }
+
+    if (hasContact && hasJoined) {
+        if (!user.verified) await db.verifyUser(userId);
+        return next();
+    }
+
+    if (ctx.message?.contact) return next();
+
+    const rows = [];
+    if (settings.verification.requireContact && !user.phoneNumber) {
+        rows.push([Markup.button.contactRequest("📱 Register Kontak")]);
+    }
+
+    const channelLine = settings.verification.requireChannelJoin
+        ? `• Join channel: <b>${esc(VERIFY_CHANNEL)}</b> ${hasJoined ? "✅" : "❌"}`
+        : "• Join channel: <b>Opsional</b>";
+
+    const text = html([
+        "<b>🔐 Verifikasi Akun</b>",
+        divider(),
+        `Brand: <b>${esc(settings.brandName)}</b>`,
+        `Role: <b>${esc(role)}</b>`,
+        `Kontak: <b>${hasContact ? "Terdaftar ✅" : "Belum ❌"}</b>`,
+        channelLine,
+        divider(),
+        "Kirim kontak dengan tombol di bawah, lalu gunakan /start lagi."
+    ]);
+
+    return ctx.reply(text, {
+        parse_mode: "HTML",
+        reply_markup: rows.length ? { keyboard: rows, resize_keyboard: true, one_time_keyboard: true } : { remove_keyboard: true }
+    });
 });
 
-// ============= FUNGSI GET SSH =============
+bot.on("contact", async (ctx) => {
+    const contact = ctx.message.contact;
+    if (contact.user_id && contact.user_id !== ctx.from.id) {
+        return ctx.reply("❌ Kirim kontak akun Telegram Anda sendiri.");
+    }
+    const user = db.getUser(ctx.from.id);
+    user.phoneNumber = contact.phone_number;
+    user.contact = {
+        firstName: contact.first_name || null,
+        lastName: contact.last_name || null,
+        userId: contact.user_id || ctx.from.id,
+        registeredAt: new Date().toISOString()
+    };
+    await db.save();
+    await ctx.reply("✅ Kontak berhasil disimpan. Ketik /start untuk membuka menu.", Markup.removeKeyboard());
+});
+
 async function getTmateSSH(containerId) {
     try {
         const { stdout } = await execPromise(`docker exec ${containerId} tmate -S /tmp/tmate.sock display -p "#{tmate_ssh}" 2>/dev/null || echo ""`);
@@ -424,7 +447,6 @@ async function startTmateSession(containerId) {
     }
 }
 
-// ============= FUNGSI INSTALL MODULE =============
 async function installModuleOnVPS(containerId, moduleKey, version) {
     try {
         const module = MODULES[moduleKey];
@@ -438,7 +460,6 @@ async function installModuleOnVPS(containerId, moduleKey, version) {
     }
 }
 
-// ============= FUNGSI DELETE FREE VPS =============
 async function scheduleFreeVPSDeletion(vpsId) {
     const vps = db.data.vps[vpsId];
     if (!vps || !vps.isFree) return;
@@ -465,7 +486,6 @@ async function deleteFreeVPS(vpsId) {
     }
 }
 
-// ============= FUNGSI INJECT REGION =============
 async function injectRegionToContainer(containerId, regionKey) {
     const region = REGIONS[regionKey];
     if (!region) return;
@@ -500,244 +520,181 @@ async function injectRegionToContainer(containerId, regionKey) {
     } catch (e) { console.log("Region inject error:", e.message); }
 }
 
-// ============= MAIN MENU =============
 async function showMainMenu(ctx) {
     const userId = ctx.from.id;
     const user = db.getUser(userId);
-    const isAdmin = ADMIN_IDS.includes(userId);
+    const role = userRole(userId, user);
     const tierInfo = TIERS[user.tier];
     const maxVPS = user.tier === "OWNER" ? "♾️" : tierInfo.maxVPS;
     const canClaim = (Date.now() - (user.lastDaily || 0)) >= DAILY_COOLDOWN;
-    const dailyStatus = canClaim ? "✅" : "⏳";
     const isVerified = await db.isVerified(userId);
-    
-    let msg =
-        `🌟 VPS BOT\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `${PROVIDER}\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `👤 ${user.tier} ${isAdmin ? '👑' : ''}\n` +
-        `🪙 ${user.coins}\n` +
-        `📦 ${user.vps.length}/${maxVPS}\n` +
-        `🎁 ${dailyStatus} ${user.totalDailyClaimed||0}x\n` +
-        `👥 ${user.referralCount||0}\n` +
-        `✅ ${isVerified ? '✓' : '✗'}\n` +
-        `━━━━━━━━━━━━━━━━━━━━`;
-    
-    const buttons = [
-        [Markup.button.callback('🖥️ Create', 'create_vps'), Markup.button.callback('📋 List', 'list_vps'), Markup.button.callback('📊 Monitor', 'monitor_vps')],
-        [Markup.button.callback('🎁 Daily', 'daily_reward'), Markup.button.callback('🎯 Referral', 'referral_info'), Markup.button.callback('🏆 Top Ref', 'top_referral')],
-        [Markup.button.callback('💎 Premium', 'premium_info'), Markup.button.callback('👑 Owner', 'contact_owner'), Markup.button.callback('📚 Help', 'help_info')]
+    const text = html([
+        `<b>🌟 ${esc(settings.brandName)}</b>`,
+        divider(),
+        `<b>${esc(PROVIDER)}</b>`,
+        divider(),
+        `👤 Role: <b>${esc(role)}</b>`,
+        `🪙 Coins: <b>${user.coins}</b>`,
+        `📦 VPS: <b>${user.vps.length}/${maxVPS}</b>`,
+        `🎁 Daily: <b>${canClaim ? "Ready" : "Cooldown"}</b>`,
+        `👥 Referral: <b>${user.referralCount || 0}</b>`,
+        `📱 Phone: <b>${user.phoneNumber ? esc(user.phoneNumber) : "Belum"}</b>`,
+        `✅ Verified: <b>${isVerified ? "Ya" : "Tidak"}</b>`,
+        divider(),
+        "Pilih menu di bawah."
+    ]);
+    const items = [
+        Markup.button.callback("🖥️ Create", "create_vps"),
+        Markup.button.callback("📋 List", "list_vps"),
+        Markup.button.callback("📊 Monitor", "monitor_vps"),
+        Markup.button.callback("🎁 Daily", "daily_reward"),
+        Markup.button.callback("🎯 Referral", "referral_info"),
+        Markup.button.callback("🏆 Top Ref", "top_referral"),
+        Markup.button.callback("💎 Premium", "premium_info"),
+        Markup.button.callback("👑 Owner", "contact_owner"),
+        Markup.button.callback("📚 Help", "help_info")
     ];
-    
-    if (isAdmin) {
-        buttons.push([Markup.button.callback('🔐 Admin', 'admin_panel')]);
-    }
-    
-    await ctx.reply(msg, Markup.inlineKeyboard(buttons));
+    if (role === "OWNER" || role === "ADMIN") items.push(Markup.button.callback("🔐 Admin", "admin_panel"));
+    await sendPage(ctx, text, twoColumnButtons(items));
 }
 
-// ============= COMMAND START =============
 bot.command("start", async (ctx) => {
-    if (ctx.chat.type === 'channel') return;
+    if (ctx.chat.type === "channel") return;
     const userId = ctx.from.id;
     const user = db.getUser(userId);
-    
+    user.startedAt = user.startedAt || new Date().toISOString();
     const args = ctx.message.text.split(" ");
     if (args.length > 1 && args[1].startsWith("ref_")) {
         const code = args[1].replace("ref_", "");
         const result = await db.processReferral(code, userId);
-        if (result) {
-            await ctx.reply(`✅ Referral! +${result.bonus} coin`);
-        }
+        if (result) await ctx.reply(`✅ Referral! +${result.bonus} coin`);
     }
-    
+    await db.save();
     await showMainMenu(ctx);
 });
 
-// ============= BUTTON CALLBACKS =============
+bot.action("menu_home", async (ctx) => {
+    await ctx.answerCbQuery();
+    await showMainMenu(ctx);
+});
+
 bot.action('create_vps', async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.reply(
-        `🖥️ CREATE VPS\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `${PROVIDER}\n💰 ${CREATE_VPS_COST} coins\n\n` +
-        `📋 /cvps [os] [region]\n\n` +
-        `🖥️ OS: ubuntu22, ubuntu24, debian11, debian12, debian13\n` +
-        `🌏 Region: singapore, indonesia, malaysia, thailand, vietnam\n\n` +
-        `💡 /cvps ubuntu22 singapore`
-    );
+    const osList = Object.entries(OS_OPTIONS).map(([key, os]) => `• <code>${key}</code> — ${os.emoji} ${esc(os.name)}`).join("\n");
+    const regionList = Object.entries(REGIONS).map(([key, region]) => `• <code>${key}</code> — ${region.flag} ${esc(region.name)}`).join("\n");
+    await sendPage(ctx, html([
+        "<b>🖥️ Create VPS</b>", divider(),
+        `Provider: <b>${esc(PROVIDER)}</b>`,
+        `Biaya: <b>${CREATE_VPS_COST} coins</b>`,
+        divider(),
+        "<b>Format</b>",
+        "<code>/cvps [os] [region]</code>",
+        divider(),
+        `<b>OS</b>\n${osList}`,
+        `<b>Region</b>\n${regionList}`,
+        divider(),
+        "Contoh: <code>/cvps ubuntu22 singapore</code>"
+    ]), [backButton()]);
 });
 
 bot.action('list_vps', async (ctx) => {
     await ctx.answerCbQuery();
-    const userId = ctx.from.id;
-    const user = db.getUser(userId);
-    
+    const user = db.getUser(ctx.from.id);
     if (user.vps.length === 0) {
-        return ctx.reply(`📭 TIDAK ADA VPS\n💡 /cvps [os] [region]`);
+        return sendPage(ctx, html(["<b>📭 VPS Kosong</b>", divider(), "Gunakan <code>/cvps [os] [region]</code> untuk membuat VPS."]), [backButton()]);
     }
-    
-    let msg = `📋 VPS\n━━━━━━━━━━━━━━━━━━━━\n📊 ${user.vps.length}\n\n`;
+    const lines = ["<b>📋 List VPS</b>", divider(), `Total: <b>${user.vps.length}</b>`, divider()];
     for (const vpsId of user.vps) {
         const vps = db.data.vps[vpsId];
         if (!vps) continue;
-        const os = OS_OPTIONS[vps.os];
-        const status = vps.status === 'running' ? '🟢' : '🔴';
-        const remaining = vps.expiresAt ? Math.max(0, Math.floor((new Date(vps.expiresAt).getTime() - Date.now()) / 60000)) : '♾️';
-        msg += `${os.emoji} ${vps.id.slice(0,8)} ${status} ${vps.ram}GB\n`;
+        const os = OS_OPTIONS[vps.os] || { emoji: "🖥️", name: vps.os };
+        const status = vps.status === 'running' ? '🟢 Running' : '🔴 Stopped';
+        const remaining = vps.expiresAt ? `${Math.max(0, Math.floor((new Date(vps.expiresAt).getTime() - Date.now()) / 60000))}m` : '♾️';
+        lines.push(`${os.emoji} <code>${vps.id.slice(0,8)}</code> — <b>${status}</b>`, `RAM ${vps.ram}GB • ${remaining}`);
     }
-    await ctx.reply(msg);
+    await sendPage(ctx, html(lines), [backButton()]);
 });
 
 bot.action('monitor_vps', async (ctx) => {
     await ctx.answerCbQuery();
-    const userId = ctx.from.id;
-    const user = db.getUser(userId);
+    const user = db.getUser(ctx.from.id);
     const stats = db.getSystemStats();
     const tierConfig = TIERS[user.tier];
-    
     let runningVPS = 0, totalRam = 0;
     for (const vpsId of user.vps) {
         const vps = db.data.vps[vpsId];
-        if (vps) {
-            if (vps.status === 'running') runningVPS++;
-            totalRam += vps.ram || 0;
-        }
+        if (vps) { if (vps.status === 'running') runningVPS++; totalRam += vps.ram || 0; }
     }
-    
-    await ctx.reply(
-        `📊 MONITOR\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `🖥️ CPU ${stats.cpu}%\n` +
-        `💾 RAM ${stats.usedRam}GB/${stats.totalRam}GB\n` +
-        `💿 Disk ${stats.usedDisk}GB/${stats.totalDisk}GB\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `📦 ${user.vps.length} VPS\n` +
-        `🟢 ${runningVPS} Running\n` +
-        `💾 ${totalRam}GB RAM\n` +
-        `🛡️ Level ${tierConfig.antiDDoS}`
-    );
+    await sendPage(ctx, html([
+        "<b>📊 Monitor</b>", divider(),
+        `🖥️ CPU: <b>${stats.cpu}%</b>`,
+        `💾 RAM: <b>${stats.usedRam}GB/${stats.totalRam}GB</b>`,
+        `💿 Disk: <b>${stats.usedDisk}GB/${stats.totalDisk}GB</b>`,
+        divider(),
+        `📦 VPS: <b>${user.vps.length}</b>`,
+        `🟢 Running: <b>${runningVPS}</b>`,
+        `💾 Allocated: <b>${totalRam}GB</b>`,
+        `🛡️ AntiDDoS: <b>Level ${tierConfig.antiDDoS}</b>`
+    ]), [backButton()]);
 });
 
 bot.action('daily_reward', async (ctx) => {
     await ctx.answerCbQuery();
     const result = await db.claimDaily(ctx.from.id);
-    if (result.success) {
-        await ctx.reply(`🎁 +${result.amount} COINS\n🪙 ${result.total}\n⏰ 24 jam lagi`);
-    } else {
-        await ctx.reply(`⏳ ${result.remaining}\n💡 Kembali lagi nanti!`);
-    }
+    await sendPage(ctx, result.success
+        ? html(["<b>🎁 Daily Reward</b>", divider(), `Berhasil klaim <b>${result.amount}</b> coins.`, `Saldo: <b>${result.total}</b>`, "Kembali lagi dalam 24 jam."])
+        : html(["<b>⏳ Daily Cooldown</b>", divider(), `Sisa waktu: <b>${result.remaining}</b>`]), [backButton()]);
 });
 
 bot.action('referral_info', async (ctx) => {
     await ctx.answerCbQuery();
-    const userId = ctx.from.id;
-    const user = db.getUser(userId);
-    const botUsername = ctx.botInfo.username;
-    const referralLink = `https://t.me/${botUsername}?start=ref_${user.referralCode}`;
+    const user = db.getUser(ctx.from.id);
+    const referralLink = `https://t.me/${ctx.botInfo.username}?start=ref_${user.referralCode}`;
     const refCount = db.data.referrals[user.referralCode]?.uses?.length || 0;
     const nextBonus = Math.floor(refCount / 10) * REFERRAL_BONUS_INCREASE + REFERRAL_BONUS;
-    
-    await ctx.reply(
-        `🎯 REFERRAL\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `🔗 ${referralLink}\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `👥 ${refCount}\n` +
-        `🎁 ${nextBonus} coins/ref\n` +
-        `📈 +${REFERRAL_BONUS_INCREASE} (${10-(refCount%10)} lagi)`
-    );
+    await sendPage(ctx, html(["<b>🎯 Referral</b>", divider(), `Link: <code>${esc(referralLink)}</code>`, divider(), `Total: <b>${refCount}</b>`, `Bonus: <b>${nextBonus} coins/ref</b>`, `Naik +${REFERRAL_BONUS_INCREASE} setelah ${10 - (refCount % 10)} referral lagi.`]), [backButton()]);
 });
 
 bot.action('top_referral', async (ctx) => {
     await ctx.answerCbQuery();
     const topUsers = db.getTopReferrals();
-    if (topUsers.length === 0) {
-        return ctx.reply(`🏆 TOP REFERRAL\n━━━━━━━━━━━━━━━━━━━━\nBelum ada data.`);
-    }
-    let msg = `🏆 TOP 10\n━━━━━━━━━━━━━━━━━━━━\n`;
+    const lines = ["<b>🏆 Top Referral</b>", divider()];
+    if (topUsers.length === 0) lines.push("Belum ada data.");
     const medals = ["🥇", "🥈", "🥉"];
-    for (let i = 0; i < Math.min(topUsers.length, 10); i++) {
-        const [userId, user] = topUsers[i];
-        const medal = i < 3 ? medals[i] : `${i+1}.`;
-        const emoji = user.tier === "OWNER" ? "👑" : user.tier === "PREMIUM" ? "💎" : "🆓";
-        msg += `${medal} ${emoji} ${userId}\n   ${user.referralCount||0} ref\n`;
-    }
-    await ctx.reply(msg);
+    topUsers.slice(0, 10).forEach(([userId, user], i) => lines.push(`${i < 3 ? medals[i] : `${i + 1}.`} <b>${esc(user.tier)}</b> <code>${userId}</code> — ${user.referralCount || 0} ref`));
+    await sendPage(ctx, html(lines), [backButton()]);
 });
 
 bot.action('premium_info', async (ctx) => {
     await ctx.answerCbQuery();
     const user = db.getUser(ctx.from.id);
-    if (user.tier === "OWNER") {
-        return ctx.reply(`✅ OWNER\n👑 Tier: Owner\n🛡️ Level ${TIERS.OWNER.antiDDoS}\n💾 ${TIERS.OWNER.maxRam}GB`);
+    const lines = ["<b>💎 Premium</b>", divider()];
+    if (user.tier === "OWNER" || user.tier === "PREMIUM") {
+        lines.push(`Status: <b>${esc(user.tier)}</b>`);
+        if (user.premiumExpiry) lines.push(`Expired: <b>${new Date(user.premiumExpiry).toLocaleDateString()}</b>`);
+    } else {
+        lines.push(`Max VPS: <b>Unlimited</b>`, `RAM: <b>${TIERS.PREMIUM.maxRam}GB</b>`, `CPU: <b>${TIERS.PREMIUM.maxCpu} Core</b>`, `Disk: <b>${TIERS.PREMIUM.maxDisk}GB</b>`, `AntiDDoS: <b>Level ${TIERS.PREMIUM.antiDDoS}</b>`, divider(), `Harga: <b>Rp${PRICES.IDR}</b>`, "Kirim bukti dengan <code>/msg bukti</code>.");
     }
-    if (user.tier === "PREMIUM") {
-        const expiry = user.premiumExpiry ? new Date(user.premiumExpiry) : null;
-        return ctx.reply(`✅ PREMIUM\n📅 ${expiry ? expiry.toLocaleDateString() : 'Permanen'}\n🛡️ Level ${TIERS.PREMIUM.antiDDoS}\n💾 ${TIERS.PREMIUM.maxRam}GB`);
-    }
-    await ctx.reply(
-        `💎 PREMIUM\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `📦 Unlimited VPS\n💾 ${TIERS.PREMIUM.maxRam}GB\n⚡ ${TIERS.PREMIUM.maxCpu} Core\n💿 ${TIERS.PREMIUM.maxDisk}GB\n🛡️ Level ${TIERS.PREMIUM.antiDDoS}\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `💰 Rp${PRICES.IDR}\n📱 DANA | GOPAY | QRIS\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `📋 Transfer Rp${PRICES.IDR}\n📋 Screenshot\n📋 /msg bukti`
-    );
+    await sendPage(ctx, html(lines), [backButton()]);
 });
 
 bot.action('contact_owner', async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.reply(
-        `👑 OWNER\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `📩 /msg [pesan]\n\n` +
-        `💡 /msg Saya mau tanya`
-    );
+    const owner = await getOwnerMention(ctx);
+    await sendPage(ctx, html(["<b>👑 Contact Owner</b>", divider(), `Owner: <b>${owner}</b>`, "Kirim pesan dengan format:", "<code>/msg pesan Anda</code>"]), [backButton()]);
 });
 
 bot.action('help_info', async (ctx) => {
     await ctx.answerCbQuery();
-    const isAdmin = ADMIN_IDS.includes(ctx.from.id);
-    let msg =
-        `📚 HELP\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `🖥️ /cvps [os] [region]\n` +
-        `📋 /list\n` +
-        `📊 /monitor\n` +
-        `/delete [id]\n` +
-        `/regen_ssh [id]\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `⏰ /extend [id]\n` +
-        `📦 /module [id] [module]\n` +
-        `🌏 /region [id]\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `💰 /daily\n` +
-        `🎯 /referral\n` +
-        `🏆 /topreferral\n` +
-        `💎 /premium\n` +
-        `/buy_premium\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `🖥️ /qemu\n` +
-        `/qemu_video\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `📩 /msg [pesan]`;
-    
-    if (isAdmin) {
-        msg += 
-            `\n━━━━━━━━━━━━━━━━━━━━\n` +
-            `🔐 ADMIN\n` +
-            `/admin\n/list_users\n/user_info [id]\n` +
-            `/delete_all_vps\n/stop_all_vps\n` +
-            `/broadcast [pesan]\n` +
-            `/addcoins [id] [amount]\n` +
-            `/removecoins [id] [amount]\n` +
-            `/checkcoins [id]\n` +
-            `/addpremium [id] [days]\n` +
-            `/block [id]\n/unblock [id]\n` +
-            `/listall\n/deletevps [id]\n` +
-            `/upgradeddos [id]\n/stats\n/users`;
-    }
-    await ctx.reply(msg);
+    const isAdmin = isPrivilegedUser(ctx.from.id);
+    const lines = ["<b>📚 Help</b>", divider(), "<b>VPS</b>", "<code>/cvps [os] [region]</code>", "<code>/list</code> • <code>/monitor</code>", "<code>/delete [id]</code> • <code>/regen_ssh [id]</code>", divider(), "<b>Reward</b>", "<code>/daily</code> • <code>/referral</code> • <code>/topreferral</code>", divider(), "<b>Support</b>", "<code>/premium</code> • <code>/buy_premium</code> • <code>/msg [pesan]</code>"];
+    if (isAdmin) lines.push(divider(), "<b>Admin</b>", "<code>/admin</code> • <code>/stats</code> • <code>/users</code>", "<code>/addcoins</code> • <code>/addpremium</code> • <code>/broadcast</code>");
+    await sendPage(ctx, html(lines), [backButton()]);
 });
 
 bot.action('admin_panel', async (ctx) => {
     await ctx.answerCbQuery();
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return sendPage(ctx, "⛔ Owner only!", [backButton()]);
     const users = await db.getAllUsers();
     const vpsList = await db.getAllVPS();
     const totalCoins = Object.values(users).reduce((sum, u) => sum + (u.coins || 0), 0);
@@ -745,20 +702,9 @@ bot.action('admin_panel', async (ctx) => {
     const ownerUsers = Object.values(users).filter(u => u.tier === "OWNER").length;
     const blockedUsers = Object.values(users).filter(u => u.isBlocked).length;
     const stats = db.getSystemStats();
-    
-    await ctx.reply(
-        `🔐 ADMIN\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `📊 ${Object.keys(users).length} Users\n` +
-        `👑 ${ownerUsers}\n💎 ${premiumUsers}\n🚫 ${blockedUsers}\n` +
-        `🖥️ ${vpsList.length} VPS\n🪙 ${totalCoins} Coins\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `🖥️ CPU ${stats.cpu}%\n💾 RAM ${stats.usedRam}GB\n💿 Disk ${stats.usedDisk}GB\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `📋 /help - Admin commands`
-    );
+    await sendPage(ctx, html(["<b>🔐 Admin Panel</b>", divider(), `Users: <b>${Object.keys(users).length}</b>`, `Owner: <b>${ownerUsers}</b> • Premium: <b>${premiumUsers}</b>`, `Blocked: <b>${blockedUsers}</b>`, `VPS: <b>${vpsList.length}</b>`, `Coins: <b>${totalCoins}</b>`, divider(), `CPU: <b>${stats.cpu}%</b>`, `RAM: <b>${stats.usedRam}GB</b>`, `Disk: <b>${stats.usedDisk}GB</b>`]), [backButton()]);
 });
 
-// ============= COMMAND CVPS =============
 bot.command("cvps", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const args = ctx.message.text.split(" ");
@@ -884,7 +830,6 @@ bot.command("cvps", async (ctx) => {
     }
 });
 
-// ============= COMMAND LIST =============
 bot.command("list", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const userId = ctx.from.id;
@@ -906,7 +851,6 @@ bot.command("list", async (ctx) => {
     await ctx.reply(msg);
 });
 
-// ============= COMMAND MONITOR =============
 bot.command("monitor", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const userId = ctx.from.id;
@@ -940,7 +884,6 @@ bot.command("monitor", async (ctx) => {
     );
 });
 
-// ============= COMMAND DELETE =============
 bot.command("delete", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const args = ctx.message.text.split(" ");
@@ -970,7 +913,6 @@ bot.command("delete", async (ctx) => {
     await ctx.reply(`✅ VPS ${foundVps.id.slice(0,8)} dihapus!`);
 });
 
-// ============= COMMAND REGEN SSH =============
 bot.command("regen_ssh", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const args = ctx.message.text.split(" ");
@@ -1009,7 +951,6 @@ bot.command("regen_ssh", async (ctx) => {
     }
 });
 
-// ============= COMMAND EXTEND =============
 bot.command("extend", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const args = ctx.message.text.split(" ");
@@ -1059,7 +1000,6 @@ bot.command("extend", async (ctx) => {
     );
 });
 
-// ============= COMMAND MODULE =============
 bot.command("module", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const args = ctx.message.text.split(" ");
@@ -1126,7 +1066,6 @@ bot.command("module", async (ctx) => {
     }
 });
 
-// ============= COMMAND REGION =============
 bot.command("region", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const args = ctx.message.text.split(" ");
@@ -1156,7 +1095,6 @@ bot.command("region", async (ctx) => {
     );
 });
 
-// ============= COMMAND DAILY =============
 bot.command("daily", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const result = await db.claimDaily(ctx.from.id);
@@ -1167,7 +1105,6 @@ bot.command("daily", async (ctx) => {
     }
 });
 
-// ============= COMMAND REFERRAL =============
 bot.command("referral", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const userId = ctx.from.id;
@@ -1186,7 +1123,6 @@ bot.command("referral", async (ctx) => {
     );
 });
 
-// ============= COMMAND TOP REFERRAL =============
 bot.command("topreferral", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const topUsers = db.getTopReferrals();
@@ -1204,7 +1140,6 @@ bot.command("topreferral", async (ctx) => {
     await ctx.reply(msg);
 });
 
-// ============= COMMAND PREMIUM =============
 bot.command("premium", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const user = db.getUser(ctx.from.id);
@@ -1223,21 +1158,27 @@ bot.command("premium", async (ctx) => {
     );
 });
 
-// ============= COMMAND BUY PREMIUM =============
 bot.command("buy_premium", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const user = db.getUser(ctx.from.id);
     if (user.tier === "OWNER" || user.tier === "PREMIUM") {
         return ctx.reply(`✅ Anda sudah ${user.tier}!`);
     }
+    const owner = await getOwnerMention(ctx);
     await ctx.reply(
-        `💎 BELI PREMIUM\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `💰 Rp${PRICES.IDR}\n📱 DANA | GOPAY | QRIS\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `📋 Transfer Rp${PRICES.IDR}\n📋 Screenshot\n📋 /msg bukti\n👤 @SkynxOffcially`
+        html([
+            "<b>💎 Beli Premium</b>",
+            divider(),
+            `Harga: <b>Rp${PRICES.IDR}</b>`,
+            "Payment: <b>DANA | GOPAY | QRIS</b>",
+            divider(),
+            `Owner: <b>${owner}</b>`,
+            `Transfer Rp${PRICES.IDR}, screenshot, lalu kirim <code>/msg bukti</code>.`
+        ]),
+        { parse_mode: "HTML" }
     );
 });
 
-// ============= COMMAND MSG =============
 bot.command("msg", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     const text = ctx.message.text.replace("/msg", "").trim();
@@ -1254,7 +1195,6 @@ bot.command("msg", async (ctx) => {
     await ctx.reply(`✅ Pesan terkirim ke owner!`);
 });
 
-// ============= COMMAND QEMU =============
 bot.command("qemu", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
     await ctx.reply(
@@ -1277,10 +1217,9 @@ bot.command("qemu_video", async (ctx) => {
     );
 });
 
-// ============= ADMIN COMMANDS =============
 bot.command("admin", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     
     const users = await db.getAllUsers();
     const vpsList = await db.getAllVPS();
@@ -1307,7 +1246,7 @@ bot.command("admin", async (ctx) => {
 
 bot.command("list_users", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     
     const activeUsers = db.getActiveUsers();
     if (activeUsers.length === 0) return ctx.reply("📭 Belum ada user.");
@@ -1322,7 +1261,7 @@ bot.command("list_users", async (ctx) => {
 
 bot.command("user_info", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     
     const args = ctx.message.text.split(" ");
     if (args.length < 2) return ctx.reply(`❌ /user_info [user_id]`);
@@ -1346,27 +1285,27 @@ bot.command("user_info", async (ctx) => {
 
 bot.command("delete_all_vps", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     await ctx.reply(`⚠️ PERINGATAN! Hapus SEMUA VPS.\n/confirm_delete_all dalam 30 detik.`);
 });
 
 bot.command("confirm_delete_all", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     await db.deleteAllVPS();
     await ctx.reply(`✅ SEMUA VPS dihapus!`);
 });
 
 bot.command("stop_all_vps", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     await db.stopAllVPS();
     await ctx.reply(`✅ SEMUA VPS di-stop!`);
 });
 
 bot.command("broadcast", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     const text = ctx.message.text.replace("/broadcast", "").trim();
     if (!text) return ctx.reply(`❌ /broadcast [pesan]`);
     
@@ -1384,7 +1323,7 @@ bot.command("broadcast", async (ctx) => {
 
 bot.command("addcoins", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     const args = ctx.message.text.split(" ");
     if (args.length < 3) return ctx.reply(`❌ /addcoins [user_id] [amount]`);
     const userId = parseInt(args[1]), amount = parseInt(args[2]);
@@ -1395,7 +1334,7 @@ bot.command("addcoins", async (ctx) => {
 
 bot.command("removecoins", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     const args = ctx.message.text.split(" ");
     if (args.length < 3) return ctx.reply(`❌ /removecoins [user_id] [amount]`);
     const userId = parseInt(args[1]), amount = parseInt(args[2]);
@@ -1408,7 +1347,7 @@ bot.command("removecoins", async (ctx) => {
 
 bot.command("checkcoins", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     const args = ctx.message.text.split(" ");
     if (args.length < 2) return ctx.reply(`❌ /checkcoins [user_id]`);
     const userId = parseInt(args[1]);
@@ -1419,7 +1358,7 @@ bot.command("checkcoins", async (ctx) => {
 
 bot.command("addpremium", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     const args = ctx.message.text.split(" ");
     if (args.length < 3) return ctx.reply(`❌ /addpremium [user_id] [days]`);
     const userId = parseInt(args[1]), days = parseInt(args[2]);
@@ -1430,7 +1369,7 @@ bot.command("addpremium", async (ctx) => {
 
 bot.command("block", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     const args = ctx.message.text.split(" ");
     if (args.length < 2) return ctx.reply(`❌ /block [user_id]`);
     const userId = parseInt(args[1]);
@@ -1442,7 +1381,7 @@ bot.command("block", async (ctx) => {
 
 bot.command("unblock", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     const args = ctx.message.text.split(" ");
     if (args.length < 2) return ctx.reply(`❌ /unblock [user_id]`);
     const userId = parseInt(args[1]);
@@ -1454,7 +1393,7 @@ bot.command("unblock", async (ctx) => {
 
 bot.command("listall", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     const allVPS = await db.getAllVPS();
     if (allVPS.length === 0) return ctx.reply("📭 Tidak ada VPS.");
     
@@ -1470,7 +1409,7 @@ bot.command("listall", async (ctx) => {
 
 bot.command("deletevps", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     const args = ctx.message.text.split(" ");
     if (args.length < 2) return ctx.reply(`❌ /deletevps [vps_id]`);
     const vpsId = args[1];
@@ -1493,7 +1432,7 @@ bot.command("deletevps", async (ctx) => {
 
 bot.command("upgradeddos", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     const args = ctx.message.text.split(" ");
     if (args.length < 2) return ctx.reply(`❌ /upgradeddos [vps_id]`);
     const vpsId = args[1];
@@ -1514,7 +1453,7 @@ bot.command("upgradeddos", async (ctx) => {
 
 bot.command("stats", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     
     const users = await db.getAllUsers();
     const vpsList = await db.getAllVPS();
@@ -1543,7 +1482,7 @@ bot.command("stats", async (ctx) => {
 
 bot.command("users", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("⛔ Owner only!");
+    if (!isPrivilegedUser(ctx.from.id)) return ctx.reply("⛔ Owner only!");
     
     const users = await db.getAllUsers();
     let msg = `👥 USER\n━━━━━━━━━━━━━━━━━━━━\n`;
@@ -1554,10 +1493,9 @@ bot.command("users", async (ctx) => {
     await ctx.reply(msg);
 });
 
-// ============= COMMAND HELP =============
 bot.command("help", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    const isAdmin = ADMIN_IDS.includes(ctx.from.id);
+    const isAdmin = isPrivilegedUser(ctx.from.id);
     let msg =
         `📚 HELP\n━━━━━━━━━━━━━━━━━━━━\n` +
         `🖥️ /cvps [os] [region]\n` +
@@ -1589,7 +1527,6 @@ bot.command("help", async (ctx) => {
     await ctx.reply(msg);
 });
 
-// ============= ERROR HANDLING =============
 bot.catch((err, ctx) => {
     console.error('Bot error:', err);
     if (ctx && ctx.reply) {
@@ -1597,7 +1534,6 @@ bot.catch((err, ctx) => {
     }
 });
 
-// ============= START BOT =============
 console.log('🚀 Starting VPS Bot...');
 console.log(`☁️ ${PROVIDER}`);
 console.log(`📊 Database: database.json`);
