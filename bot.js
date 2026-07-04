@@ -1,6 +1,5 @@
 const { Telegraf, Markup } = require("telegraf");
 const settings = require("./settings");
-const OS_OPTIONS = require("./config/os");
 const fs = require("fs").promises;
 const crypto = require("crypto");
 const { exec } = require("child_process");
@@ -22,6 +21,15 @@ const REFERRAL_BONUS = settings.prices.referralBonus;
 const REFERRAL_BONUS_INCREASE = settings.prices.referralBonusIncrease;
 
 const PROVIDER = settings.provider;
+
+
+const OS_OPTIONS = {
+    ubuntu22: { name: "Ubuntu 22.04 LTS", emoji: "🐧", image: "ubuntu-vps:22.04", desc: "Stabil & Terpercaya" },
+    ubuntu24: { name: "Ubuntu 24.04 LTS", emoji: "🐧", image: "ubuntu-vps:24.04", desc: "Versi LTS Terbaru" },
+    debian11: { name: "Debian 11 Bullseye", emoji: "🦕", image: "debian-vps:11", desc: "Stabil & Aman" },
+    debian12: { name: "Debian 12 Bookworm", emoji: "🦕", image: "debian-vps:12", desc: "Stabil Terkini" },
+    debian13: { name: "Debian 13 Trixie", emoji: "🦕", image: "debian-vps:13", desc: "Rilis Uji Coba" }
+};
 
 const REGIONS = {
     singapore: { name: "Singapore", flag: "🇸🇬", code: "sg", location: "1.2897,103.8501", country: "SG", city: "Singapore", timezone: "Asia/Singapore" },
@@ -533,6 +541,7 @@ async function showMainMenu(ctx) {
         divider(),
         `<b>${esc(PROVIDER)}</b>`,
         divider(),
+        `🆔 ID: <code>${userId}</code>`,
         `👤 Role: <b>${esc(role)}</b>`,
         `🪙 Coins: <b>${user.coins}</b>`,
         `📦 VPS: <b>${user.vps.length}/${maxVPS}</b>`,
@@ -552,7 +561,8 @@ async function showMainMenu(ctx) {
         Markup.button.callback("🏆 Top Ref", "top_referral"),
         Markup.button.callback("💎 Premium", "premium_info"),
         Markup.button.callback("👑 Owner", "contact_owner"),
-        Markup.button.callback("📚 Help", "help_info")
+        Markup.button.callback("📚 Help", "help_info"),
+        Markup.button.callback("🖥️ QEMU", "qemu_info")
     ];
     if (role === "OWNER" || role === "ADMIN") items.push(Markup.button.callback("🔐 Admin", "admin_panel"));
     await sendPage(ctx, text, twoColumnButtons(items));
@@ -578,23 +588,55 @@ bot.action("menu_home", async (ctx) => {
     await showMainMenu(ctx);
 });
 
+function createOsButtons() {
+    return twoColumnButtons(Object.entries(OS_OPTIONS).map(([key, os]) => Markup.button.callback(`${os.emoji} ${os.name.replace(" LTS", "")}`, `create_os_${key}`))).concat([backButton()]);
+}
+
+function createRegionButtons(osKey) {
+    return twoColumnButtons(Object.entries(REGIONS).map(([key, region]) => Markup.button.callback(`${region.flag} ${region.name.split(" ")[0]}`, `create_region_${osKey}_${key}`))).concat([[Markup.button.callback("⬅️ Pilih OS", "create_vps")]]);
+}
+
+async function showCreatePage(ctx) {
+    const user = db.getUser(ctx.from.id);
+    const tier = TIERS[user.tier];
+    await sendPage(ctx, html([
+        "<b>🖥️ Create VPS</b>",
+        divider(),
+        `User ID: <code>${ctx.from.id}</code>`,
+        `Tier: <b>${esc(user.tier)}</b>`,
+        `Biaya: <b>${tier.coinCost || 0} coins</b>`,
+        `Limit: <b>${user.tier === "OWNER" ? "♾️" : tier.maxVPS}</b>`,
+        divider(),
+        "Pilih OS VPS dari tombol di bawah."
+    ]), createOsButtons());
+}
+
 bot.action('create_vps', async (ctx) => {
     await ctx.answerCbQuery();
-    const osList = Object.entries(OS_OPTIONS).map(([key, os]) => `• <code>${key}</code> — ${os.emoji} ${esc(os.name)}`).join("\n");
-    const regionList = Object.entries(REGIONS).map(([key, region]) => `• <code>${key}</code> — ${region.flag} ${esc(region.name)}`).join("\n");
+    await showCreatePage(ctx);
+});
+
+bot.action(/^create_os_(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const osKey = ctx.match[1];
+    const os = OS_OPTIONS[osKey];
+    if (!os) return showCreatePage(ctx);
     await sendPage(ctx, html([
-        "<b>🖥️ Create VPS</b>", divider(),
-        `Provider: <b>${esc(PROVIDER)}</b>`,
-        `Biaya: <b>${CREATE_VPS_COST} coins</b>`,
+        "<b>🌏 Pilih Region</b>",
         divider(),
-        "<b>Format</b>",
-        "<code>/cvps [os] [region]</code>",
+        `OS: ${os.emoji} <b>${esc(os.name)}</b>`,
+        `Image: <code>${esc(os.image)}</code>`,
         divider(),
-        `<b>OS</b>\n${osList}`,
-        `<b>Region</b>\n${regionList}`,
-        divider(),
-        "Contoh: <code>/cvps ubuntu22 singapore</code>"
-    ]), [backButton()]);
+        "Pilih region VPS dari tombol di bawah."
+    ]), createRegionButtons(osKey));
+});
+
+bot.action(/^create_region_([^_]+)_(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery("Deploy VPS dimulai...");
+    const osKey = ctx.match[1];
+    const regionKey = ctx.match[2];
+    await ctx.editMessageText(html(["<b>⏳ Deploy VPS</b>", divider(), `OS: <code>${esc(osKey)}</code>`, `Region: <code>${esc(regionKey)}</code>`, "Mohon tunggu, proses sedang berjalan..."]), { parse_mode: "HTML" }).catch(() => {});
+    await deployVPS(ctx, osKey, regionKey);
 });
 
 bot.action('list_vps', async (ctx) => {
@@ -692,6 +734,21 @@ bot.action('help_info', async (ctx) => {
     await sendPage(ctx, html(lines), [backButton()]);
 });
 
+bot.action('qemu_info', async (ctx) => {
+    await ctx.answerCbQuery();
+    const installCmd = "apt install qemu-system cloud-image-utils wget -y";
+    const runCmd = "bash <(curl -fsSL https://raw.githubusercontent.com/hopingboyz/vms/main/nokvm.sh)";
+    await sendPage(ctx, html([
+        "<b>🖥️ QEMU</b>",
+        divider(),
+        "Klik command di bawah untuk menyalin:",
+        `<code>${esc(installCmd)}</code>`,
+        `<code>${esc(runCmd)}</code>`,
+        divider(),
+        `Video: <code>${esc(VIDEO_LINK)}</code>`
+    ]), [backButton()]);
+});
+
 bot.action('admin_panel', async (ctx) => {
     await ctx.answerCbQuery();
     if (!isPrivilegedUser(ctx.from.id)) return sendPage(ctx, "⛔ Owner only!", [backButton()]);
@@ -702,35 +759,10 @@ bot.action('admin_panel', async (ctx) => {
     const ownerUsers = Object.values(users).filter(u => u.tier === "OWNER").length;
     const blockedUsers = Object.values(users).filter(u => u.isBlocked).length;
     const stats = db.getSystemStats();
-    await sendPage(ctx, html(["<b>🔐 Admin Panel</b>", divider(), `Users: <b>${Object.keys(users).length}</b>`, `Owner: <b>${ownerUsers}</b> • Premium: <b>${premiumUsers}</b>`, `Blocked: <b>${blockedUsers}</b>`, `VPS: <b>${vpsList.length}</b>`, `Coins: <b>${totalCoins}</b>`, divider(), `CPU: <b>${stats.cpu}%</b>`, `RAM: <b>${stats.usedRam}GB</b>`, `Disk: <b>${stats.usedDisk}GB</b>`]), [backButton()]);
+    await sendPage(ctx, html(["<b>🔐 Admin Panel</b>", divider(), `Users: <b>${Object.keys(users).length}</b>`, `Owner: <b>${ownerUsers}</b> • Premium: <b>${premiumUsers}</b>`, `Blocked: <b>${blockedUsers}</b>`, `VPS: <b>${vpsList.length}</b>`, `Coins: <b>${totalCoins}</b>`, divider(), `CPU: <b>${stats.cpu}%</b>`, `RAM: <b>${stats.usedRam}GB</b>`, `Disk: <b>${stats.usedDisk}GB</b>`, divider(), "Pilih kontrol admin di bawah." ]), twoColumnButtons([Markup.button.callback("👥 Users", "admin_users"), Markup.button.callback("📊 Stats", "admin_stats"), Markup.button.callback("📣 Broadcast", "admin_broadcast_help"), Markup.button.callback("🖥️ VPS All", "admin_vps"), Markup.button.callback("🛑 Stop All", "admin_stop_all"), Markup.button.callback("🗑 Delete All", "admin_delete_all_help"), Markup.button.callback("⬅️ Kembali", "menu_home")]));
 });
 
-bot.command("cvps", async (ctx) => {
-    if (ctx.chat.type === 'channel') return;
-    const args = ctx.message.text.split(" ");
-    
-    if (args.length < 3) {
-        let osList = "";
-        for (const [key, os] of Object.entries(OS_OPTIONS)) {
-            osList += `${key} - ${os.emoji} ${os.name}\n`;
-        }
-        let regionList = "";
-        for (const [key, region] of Object.entries(REGIONS)) {
-            regionList += `${key} - ${region.flag} ${region.name}\n`;
-        }
-        
-        return ctx.reply(
-            `🖥️ CREATE VPS\n━━━━━━━━━━━━━━━━━━━━\n` +
-            `${PROVIDER}\n💰 ${CREATE_VPS_COST} coins\n\n` +
-            `📋 /cvps [os] [region]\n\n` +
-            `🖥️ OS:\n${osList}\n` +
-            `🌏 Region:\n${regionList}\n` +
-            `💡 /cvps ubuntu22 singapore`
-        );
-    }
-    
-    const osKey = args[1].toLowerCase();
-    const regionKey = args[2].toLowerCase();
+async function deployVPS(ctx, osKey, regionKey) {
     const userId = ctx.from.id;
     const user = db.getUser(userId);
     const tier = user.tier;
@@ -817,10 +849,10 @@ bot.command("cvps", async (ctx) => {
                 `💾 ${vps.ram}GB\n⚡ ${vps.cpu} Core\n💿 ${vps.disk}GB\n` +
                 `🛡️ Level ${vps.antiDDoS}\n📊 ${tier}\n` +
                 `⏳ ${remaining !== '♾️' ? remaining+'m' : '♾️'}\n━━━━━━━━━━━━━━━━━━━━\n` +
-                `🔑 SSH\n${sshCommand}\n━━━━━━━━━━━━━━━━━━━━\n` +
+                `🔑 SSH\n<code>${esc(sshCommand)}</code>\n━━━━━━━━━━━━━━━━━━━━\n` +
                 `📦 /module [id] [module]\n⏰ /extend [id] (${EXTEND_COST} coins)\n` +
                 `⚠️ NO DDOS! BAN PERMANEN!`
-            );
+            , { parse_mode: "HTML" });
         } else {
             await ctx.reply(`⚠️ VPS ${vps.id.slice(0,8)} dibuat\n🔑 SSH belum siap\n💡 /regen_ssh ${vps.id.slice(0,8)}`);
         }
@@ -828,6 +860,62 @@ bot.command("cvps", async (ctx) => {
         console.error("Deploy error:", error);
         await ctx.reply(`❌ Gagal deploy VPS: ${error.message}`);
     }
+}
+
+
+bot.action('admin_users', async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isPrivilegedUser(ctx.from.id)) return;
+    const users = await db.getAllUsers();
+    const lines = ["<b>👥 Users</b>", divider()];
+    for (const [userId, user] of Object.entries(users).slice(0, 15)) lines.push(`<code>${userId}</code> — <b>${esc(user.tier)}</b> • ${user.verified ? "✅" : "❌"} • ${user.coins || 0} coins`);
+    if (Object.keys(users).length > 15) lines.push(`+${Object.keys(users).length - 15} user lainnya. Gunakan <code>/users</code> untuk full list.`);
+    await sendPage(ctx, html(lines), [[Markup.button.callback("⬅️ Admin", "admin_panel")]]);
+});
+
+bot.action('admin_stats', async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isPrivilegedUser(ctx.from.id)) return;
+    const users = await db.getAllUsers();
+    const vpsList = await db.getAllVPS();
+    const stats = db.getSystemStats();
+    await sendPage(ctx, html(["<b>📊 Stats</b>", divider(), `Users: <b>${Object.keys(users).length}</b>`, `Active: <b>${db.getActiveUsers().length}</b>`, `VPS: <b>${vpsList.length}</b>`, `CPU: <b>${stats.cpu}%</b>`, `RAM: <b>${stats.usedRam}GB/${stats.totalRam}GB</b>`, `Disk: <b>${stats.usedDisk}GB/${stats.totalDisk}GB</b>`]), [[Markup.button.callback("⬅️ Admin", "admin_panel")]]);
+});
+
+bot.action('admin_vps', async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isPrivilegedUser(ctx.from.id)) return;
+    const allVPS = await db.getAllVPS();
+    const lines = ["<b>🖥️ Semua VPS</b>", divider(), `Total: <b>${allVPS.length}</b>`];
+    allVPS.slice(0, 15).forEach(vps => lines.push(`<code>${vps.id.slice(0,8)}</code> — ${vps.regionFlag || "🌍"} ${esc(vps.status)} • owner <code>${vps.owner}</code>`));
+    if (allVPS.length > 15) lines.push(`+${allVPS.length - 15} VPS lainnya. Gunakan <code>/listall</code> untuk full list.`);
+    await sendPage(ctx, html(lines), [[Markup.button.callback("⬅️ Admin", "admin_panel")]]);
+});
+
+bot.action('admin_broadcast_help', async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isPrivilegedUser(ctx.from.id)) return;
+    await sendPage(ctx, html(["<b>📣 Broadcast</b>", divider(), "Kirim broadcast dengan command copy:", "<code>/broadcast pesan anda</code>"]), [[Markup.button.callback("⬅️ Admin", "admin_panel")]]);
+});
+
+bot.action('admin_delete_all_help', async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isPrivilegedUser(ctx.from.id)) return;
+    await sendPage(ctx, html(["<b>🗑 Delete All VPS</b>", divider(), "Untuk keamanan, konfirmasi tetap memakai command copy:", "<code>/confirm_delete_all</code>"]), [[Markup.button.callback("⬅️ Admin", "admin_panel")]]);
+});
+
+bot.action('admin_stop_all', async (ctx) => {
+    await ctx.answerCbQuery("Stopping all VPS...");
+    if (!isPrivilegedUser(ctx.from.id)) return;
+    await db.stopAllVPS();
+    await sendPage(ctx, html(["<b>✅ Stop All VPS</b>", divider(), "Semua VPS berhasil di-stop."]), [[Markup.button.callback("⬅️ Admin", "admin_panel")]]);
+});
+
+bot.command("cvps", async (ctx) => {
+    if (ctx.chat.type === 'channel') return;
+    const args = ctx.message.text.split(" ");
+    if (args.length < 3) return showCreatePage(ctx);
+    await deployVPS(ctx, args[1].toLowerCase(), args[2].toLowerCase());
 });
 
 bot.command("list", async (ctx) => {
@@ -942,7 +1030,7 @@ bot.command("regen_ssh", async (ctx) => {
         if (sshCommand) {
             foundVps.sshCommand = sshCommand;
             await db.save();
-            await ctx.reply(`✅ SSH REGENERASI!\n🔑 ${sshCommand}`);
+            await ctx.reply(`✅ SSH REGENERASI!\n🔑 <code>${esc(sshCommand)}</code>`, { parse_mode: "HTML" });
         } else {
             await ctx.reply(`❌ Gagal. Coba lagi nanti.`);
         }
@@ -1056,7 +1144,7 @@ bot.command("module", async (ctx) => {
                 `✅ ${module.name} v${version} INSTALLED!\n` +
                 `━━━━━━━━━━━━━━━━━━━━\n` +
                 `🆔 ${foundVps.id.slice(0,8)}\n📦 ${module.name} v${version}\n` +
-                `🔑 SSH: ${foundVps.sshCommand || 'Gunakan /regen_ssh'}`
+                `🔑 SSH: ${foundVps.sshCommand ? `<code>${esc(foundVps.sshCommand)}</code>` : 'Gunakan /regen_ssh'}`
             );
         } else {
             await ctx.reply(`❌ Gagal install: ${result.error || 'Unknown error'}`);
@@ -1197,24 +1285,16 @@ bot.command("msg", async (ctx) => {
 
 bot.command("qemu", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    await ctx.reply(
-        `🖥️ QEMU\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `📋 Perintah:\n` +
-        `apt install qemu-system cloud-image-utils wget -y\n` +
-        `bash <(curl -fsSL https://raw.githubusercontent.com/hopingboyz/vms/main/nokvm.sh)\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n📹 /qemu_video`
-    );
+    const installCmd = "apt install qemu-system cloud-image-utils wget -y";
+    const runCmd = "bash <(curl -fsSL https://raw.githubusercontent.com/hopingboyz/vms/main/nokvm.sh)";
+    await ctx.reply(html(["<b>🖥️ QEMU</b>", divider(), "Klik command untuk copy:", `<code>${esc(installCmd)}</code>`, `<code>${esc(runCmd)}</code>`, divider(), "Video: <code>/qemu_video</code>"]), { parse_mode: "HTML" });
 });
 
 bot.command("qemu_video", async (ctx) => {
     if (ctx.chat.type === 'channel') return;
-    await ctx.reply(
-        `📹 QEMU\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `🔗 ${VIDEO_LINK}\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `📋 Perintah:\n` +
-        `apt install qemu-system cloud-image-utils wget -y\n` +
-        `bash <(curl -fsSL https://raw.githubusercontent.com/hopingboyz/vms/main/nokvm.sh)`
-    );
+    const installCmd = "apt install qemu-system cloud-image-utils wget -y";
+    const runCmd = "bash <(curl -fsSL https://raw.githubusercontent.com/hopingboyz/vms/main/nokvm.sh)";
+    await ctx.reply(html(["<b>📹 QEMU Video</b>", divider(), `Link: <code>${esc(VIDEO_LINK)}</code>`, divider(), `<code>${esc(installCmd)}</code>`, `<code>${esc(runCmd)}</code>`]), { parse_mode: "HTML" });
 });
 
 bot.command("admin", async (ctx) => {
