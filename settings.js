@@ -4,7 +4,7 @@ module.exports = {
     provider: "☁️ Skynx Cloud System",
     owner: "7285215691",
     admins: ["7285215691"],
-    logsChannel: -92728827282,
+    logsChannel: -1003207479119,
     verification: {
         enabled: true,
         requireChannelJoin: false,
