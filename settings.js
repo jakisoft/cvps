@@ -1,7 +1,7 @@
 module.exports = {
     token: process.env.BOT_TOKEN || "8640346901:AAEjNtLYejnHnfocKNalcV1P2jqnbN4eTrc",
-    brandName: "Skynx Cloud System",
-    provider: "☁️ Skynx Cloud System",
+    brandName: "JKSoft Cloud System",
+    provider: "☁️ JKSoft Cloud System",
     owner: "7285215691",
     admins: ["7285215691"],
     logsChannel: -1003207479119,
