@@ -1,0 +1,8 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt update && apt install -y systemd systemd-sysv tmate openssh-server sudo curl wget iproute2 net-tools && mkdir -p /run/sshd && echo "root:root" | chpasswd && systemctl enable ssh && apt clean
+RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+RUN mkdir -p /root/.tmate && echo "set -g tmate-server-host tmate.io" > /root/.tmate/tmate.conf
+RUN echo '#!/bin/bash\nsystemctl start ssh\ntmate -F &\ntail -f /dev/null' > /start.sh && chmod +x /start.sh
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
