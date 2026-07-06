@@ -9,7 +9,7 @@ const execPromise = util.promisify(exec);
 
 const TOKEN = "8209422223:AAH8geV1EDwinrKzBPoUugXiiDm_HQqbG98";
 const ADMIN_IDS = [7285215691];
-const BOT_IMAGE = "https://files.catbox.moe/3u6zmk.jpg";
+const BOT_IMAGE = "https://www.jaky.dev/portfolio.jpeg";
 const PROVIDER = "☁️ JKSoft Cloud System";
 const DB_FILE = "/data/database.json";
 
@@ -29,6 +29,27 @@ const OS_OPTIONS = [
     { key: "debian13", name: "Debian 13 Trixie", emoji: "🦕", image: "debian-vps:13" }
 ];
 
+const RAM_OPTIONS = [
+    { name: "2GB", detail: "2048 MB" },
+    { name: "4GB", detail: "4096 MB" },
+    { name: "8GB", detail: "8192 MB" },
+    { name: "16GB", detail: "16384 MB" }
+];
+
+const DISK_OPTIONS = [
+    { name: "64GB" },
+    { name: "128GB" },
+    { name: "192GB" },
+    { name: "256GB" }
+];
+
+const CPU_OPTIONS = [
+    { name: "1 Core" },
+    { name: "2 Core" },
+    { name: "4 Core" },
+    { name: "8 Core" }
+];
+
 class Database {
     constructor() {
         this.data = { vps: {} };
@@ -46,7 +67,7 @@ class Database {
         await fs.mkdir(path.dirname(DB_FILE), { recursive: true });
         await fs.writeFile(DB_FILE, JSON.stringify(this.data, null, 2));
     }
-    async createVPS(osKey, regionKey) {
+    async createVPS(osKey, regionKey, ram, disk, cpu) {
         const vpsId = crypto.randomBytes(4).toString("hex");
         const regionData = REGIONS.find(r => r.key === regionKey);
         const osData = OS_OPTIONS.find(o => o.key === osKey);
@@ -62,6 +83,9 @@ class Database {
             regionCountry: regionData ? regionData.country : "XX",
             regionCity: regionData ? regionData.city : "Unknown",
             regionTimezone: regionData ? regionData.timezone : "UTC",
+            ram: ram,
+            disk: disk,
+            cpu: cpu,
             provider: PROVIDER,
             status: "deploying",
             createdAt: new Date().toISOString(),
@@ -106,7 +130,7 @@ const sessions = {};
 
 function getSession(userId) {
     if (!sessions[userId]) {
-        sessions[userId] = { state: "idle", selectedOS: null, selectedRegion: null, selectedVPSId: null };
+        sessions[userId] = { state: "idle", selectedOS: null, selectedRegion: null, selectedRAM: null, selectedDisk: null, selectedCPU: null, selectedVPSId: null };
     }
     return sessions[userId];
 }
@@ -338,13 +362,147 @@ REGIONS.forEach((region, regIdx) => {
         const userId = ctx.from.id;
         const session = getSession(userId);
         session.selectedRegion = region.key;
-        session.state = "confirm_vps";
+        session.state = "choose_ram";
 
         const osData = OS_OPTIONS.find(o => o.key === session.selectedOS);
 
+        let text = `<b>💾 PILIH MEMORY / RAM VPS</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
+        RAM_OPTIONS.forEach((ram, idx) => {
+            text += `${idx + 1}. <b>${ram.name}</b> (<code>${ram.detail}</code>)\n`;
+        });
+        text += `━━━━━━━━━━━━━━━━━━━━\n`;
+        text += `💿 <b>OS Terpilih:</b> <code>${osData.name}</code>\n`;
+        text += `🌏 <b>Region Terpilih:</b> <code>${region.flag} ${region.name}</code>\n`;
+        text += `━━━━━━━━━━━━━━━━━━━━\n<i>Silakan pilih nomor kapasitas RAM yang Anda inginkan.</i>`;
+
+        const buttons = [];
+        let row = [];
+        RAM_OPTIONS.forEach((ram, idx) => {
+            row.push(Markup.button.callback(`${idx + 1}`, `set_ram_${idx}`));
+            if (row.length === 4) {
+                buttons.push(row);
+                row = [];
+            }
+        });
+        if (row.length > 0) buttons.push(row);
+        buttons.push([
+            Markup.button.callback("↩️ Back (Pilih Region)", `set_os_${OS_OPTIONS.findIndex(o => o.key === session.selectedOS)}`),
+            Markup.button.callback("📋 Menu Utama", "main_menu")
+        ]);
+
+        await ctx.editMessageCaption(text, {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard(buttons)
+        });
+    });
+});
+
+RAM_OPTIONS.forEach((ram, ramIdx) => {
+    bot.action(`set_ram_${ramIdx}`, async (ctx) => {
+        await ctx.answerCbQuery();
+        const userId = ctx.from.id;
+        const session = getSession(userId);
+        session.selectedRAM = ram.name;
+        session.state = "choose_disk";
+
+        const osData = OS_OPTIONS.find(o => o.key === session.selectedOS);
+        const regionData = REGIONS.find(r => r.key === session.selectedRegion);
+
+        let text = `<b>💿 PILIH KAPASITAS DISK VPS</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
+        DISK_OPTIONS.forEach((disk, idx) => {
+            text += `${idx + 1}. <b>${disk.name} SSD Storage</b>\n`;
+        });
+        text += `━━━━━━━━━━━━━━━━━━━━\n`;
+        text += `💿 <b>OS Terpilih:</b> <code>${osData.name}</code>\n`;
+        text += `🌏 <b>Region Terpilih:</b> <code>${regionData.flag} ${regionData.name}</code>\n`;
+        text += `💾 <b>RAM Terpilih:</b> <code>${session.selectedRAM} (${ram.detail})</code>\n`;
+        text += `━━━━━━━━━━━━━━━━━━━━\n<i>Silakan pilih nomor kapasitas media penyimpanan SSD.</i>`;
+
+        const buttons = [];
+        let row = [];
+        DISK_OPTIONS.forEach((disk, idx) => {
+            row.push(Markup.button.callback(`${idx + 1}`, `set_disk_${idx}`));
+            if (row.length === 4) {
+                buttons.push(row);
+                row = [];
+            }
+        });
+        if (row.length > 0) buttons.push(row);
+        buttons.push([
+            Markup.button.callback("↩️ Back (Pilih RAM)", `set_region_${REGIONS.findIndex(r => r.key === session.selectedRegion)}`),
+            Markup.button.callback("📋 Menu Utama", "main_menu")
+        ]);
+
+        await ctx.editMessageCaption(text, {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard(buttons)
+        });
+    });
+});
+
+DISK_OPTIONS.forEach((disk, diskIdx) => {
+    bot.action(`set_disk_${diskIdx}`, async (ctx) => {
+        await ctx.answerCbQuery();
+        const userId = ctx.from.id;
+        const session = getSession(userId);
+        session.selectedDisk = disk.name;
+        session.state = "choose_cpu";
+
+        const osData = OS_OPTIONS.find(o => o.key === session.selectedOS);
+        const regionData = REGIONS.find(r => r.key === session.selectedRegion);
+        const ramData = RAM_OPTIONS.find(rm => rm.name === session.selectedRAM);
+
+        let text = `<b>⚡ PILIH CORE CPU VPS</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
+        CPU_OPTIONS.forEach((cpu, idx) => {
+            text += `${idx + 1}. <b>${cpu.name} Processor</b>\n`;
+        });
+        text += `━━━━━━━━━━━━━━━━━━━━\n`;
+        text += `💿 <b>OS Terpilih:</b> <code>${osData.name}</code>\n`;
+        text += `🌏 <b>Region Terpilih:</b> <code>${regionData.flag} ${regionData.name}</code>\n`;
+        text += `💾 <b>RAM Terpilih:</b> <code>${session.selectedRAM} (${ramData.detail})</code>\n`;
+        text += `💿 <b>Disk Terpilih:</b> <code>${session.selectedDisk}</code>\n`;
+        text += `━━━━━━━━━━━━━━━━━━━━\n<i>Silakan pilih nomor alokasi virtual core processor.</i>`;
+
+        const buttons = [];
+        let row = [];
+        CPU_OPTIONS.forEach((cpu, idx) => {
+            row.push(Markup.button.callback(`${idx + 1}`, `set_cpu_${idx}`));
+            if (row.length === 4) {
+                buttons.push(row);
+                row = [];
+            }
+        });
+        if (row.length > 0) buttons.push(row);
+        buttons.push([
+            Markup.button.callback("↩️ Back (Pilih Disk)", `set_ram_${RAM_OPTIONS.findIndex(rm => rm.name === session.selectedRAM)}`),
+            Markup.button.callback("📋 Menu Utama", "main_menu")
+        ]);
+
+        await ctx.editMessageCaption(text, {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard(buttons)
+        });
+    });
+});
+
+CPU_OPTIONS.forEach((cpu, cpuIdx) => {
+    bot.action(`set_cpu_${cpuIdx}`, async (ctx) => {
+        await ctx.answerCbQuery();
+        const userId = ctx.from.id;
+        const session = getSession(userId);
+        session.selectedCPU = cpu.name;
+        session.state = "confirm_vps";
+
+        const osData = OS_OPTIONS.find(o => o.key === session.selectedOS);
+        const regionData = REGIONS.find(r => r.key === session.selectedRegion);
+        const ramData = RAM_OPTIONS.find(rm => rm.name === session.selectedRAM);
+
         let text = `<b>⚠️ KONFIRMASI PEMBUATAN VPS</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
                    `💿 <b>Sistem Operasi:</b> <code>${osData.emoji} ${osData.name}</code>\n` +
-                   `🌏 <b>Region Server:</b> <code>${region.flag} ${region.name}</code>\n` +
+                   `🌏 <b>Region Server:</b> <code>${regionData.flag} ${regionData.name}</code>\n` +
+                   `💾 <b>Alokasi RAM:</b> <code>${session.selectedRAM} (${ramData.detail})</code>\n` +
+                   `💿 <b>Kapasitas Disk:</b> <code>${session.selectedDisk}</code>\n` +
+                   `⚡ <b>Inti Processor:</b> <code>${session.selectedCPU}</code>\n` +
                    `💼 <b>Developer:</b> <code>${PROVIDER}</code>\n` +
                    `━━━━━━━━━━━━━━━━━━━━\n` +
                    `<i>Apakah spesifikasi pembuatan VPS di atas sudah benar? Tekan Deploy untuk memulai proses.</i>`;
@@ -355,7 +513,7 @@ REGIONS.forEach((region, regIdx) => {
                 Markup.button.callback("❌ Batalkan", "main_menu")
             ],
             [
-                Markup.button.callback("↩️ Back (Pilih Region)", `set_os_${OS_OPTIONS.findIndex(o => o.key === session.selectedOS)}`)
+                Markup.button.callback("↩️ Back (Pilih CPU)", `set_disk_${DISK_OPTIONS.findIndex(d => d.name === session.selectedDisk)}`)
             ]
         ];
 
@@ -379,13 +537,16 @@ bot.action("execute_deploy", async (ctx) => {
         `<b>⏳ SEDANG MEMBANGUN VPS...</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
         `💿 <b>OS:</b> <code>${osData.name}</code>\n` +
         `🌏 <b>Region:</b> <code>${regionData.flag} ${regionData.name}</code>\n` +
+        `💾 <b>RAM:</b> <code>${session.selectedRAM}</code>\n` +
+        `💿 <b>Disk:</b> <code>${session.selectedDisk}</code>\n` +
+        `⚡ <b>CPU:</b> <code>${session.selectedCPU}</code>\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
         `<i>Sistem sedang menyiapkan container docker dan menginstalasi modul pendukung. Harap tunggu sebentar...</i>`,
         { parse_mode: "HTML" }
     );
 
     try {
-        const vps = await db.createVPS(session.selectedOS, session.selectedRegion);
+        const vps = await db.createVPS(session.selectedOS, session.selectedRegion, session.selectedRAM, session.selectedDisk, session.selectedCPU);
         const cmd = `docker run -d --name vps_${vps.id} --privileged ${osData.image}`;
         const { stdout } = await execPromise(cmd);
         vps.containerId = stdout.trim();
@@ -403,6 +564,9 @@ bot.action("execute_deploy", async (ctx) => {
                               `🆔 <b>ID VPS:</b> <code>${vps.id}</code>\n` +
                               `💿 <b>OS:</b> <code>${osData.emoji} ${osData.name}</code>\n` +
                               `🌏 <b>Lokasi:</b> <code>${regionData.flag} ${regionData.name}</code>\n` +
+                              `💾 <b>RAM:</b> <code>${session.selectedRAM}</code>\n` +
+                              `💿 <b>Disk:</b> <code>${session.selectedDisk}</code>\n` +
+                              `⚡ <b>CPU:</b> <code>${session.selectedCPU}</code>\n` +
                               `🟢 <b>Status:</b> <code>Running</code>\n` +
                               `━━━━━━━━━━━━━━━━━━━━\n` +
                               `🔑 <b>SSH (Tmate Command):</b>\n<code>${sshCommand}</code>\n` +
@@ -536,6 +700,9 @@ async function renderVPSManagement(ctx, vpsId, isRefresh = false) {
                `🟢 <b>Status Server:</b> <code>${statusText}</code>\n` +
                `💿 <b>OS Variant:</b> <code>${vps.osEmoji} ${vps.osName}</code>\n` +
                `🌏 <b>Region Server:</b> <code>${vps.regionFlag} ${vps.regionName}</code>\n` +
+               `💾 <b>Alokasi RAM:</b> <code>${vps.ram || "2GB"}</code>\n` +
+               `💿 <b>Kapasitas Disk:</b> <code>${vps.disk || "64GB"}</code>\n` +
+               `⚡ <b>Inti Processor:</b> <code>${vps.cpu || "1 Core"}</code>\n` +
                `📅 <b>Dibuat Pada:</b> <code>${createdDate}</code>\n` +
                `━━━━━━━━━━━━━━━━━━━━\n` +
                `📊 <b>MONITORING CONTAINER VPS</b>\n` +
@@ -649,6 +816,9 @@ bot.action(/^confirm_delete_vps_(.+)$/, async (ctx) => {
                `🆔 <b>ID VPS:</b> <code>${vps.id}</code>\n` +
                `💿 <b>OS:</b> <code>${vps.osEmoji} ${vps.osName}</code>\n` +
                `🌏 <b>Region:</b> <code>${vps.regionFlag} ${vps.regionName}</code>\n` +
+               `💾 <b>RAM:</b> <code>${vps.ram || "2GB"}</code>\n` +
+               `💿 <b>Disk:</b> <code>${vps.disk || "64GB"}</code>\n` +
+               `⚡ <b>CPU:</b> <code>${vps.cpu || "1 Core"}</code>\n` +
                `━━━━━━━━━━━━━━━━━━━━\n` +
                `<b>🔴 WARNING:</b> Semua data, file, modul, dan konfigurasi di dalam VPS ini akan dihancurkan secara total dan permanen tanpa ada pencadangan!\n` +
                `━━━━━━━━━━━━━━━━━━━━\n` +
