@@ -4,6 +4,9 @@ set -e
 apt update -y
 apt upgrade -y -q
 
+mkdir -p /data
+chmod 777 /data
+
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt install -y nodejs
 
