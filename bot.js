@@ -7,7 +7,7 @@ const util = require("util");
 const os = require("os");
 const execPromise = util.promisify(exec);
 
-const TOKEN = "8209422223:AAH8geV1EDwinrKzBPoUugXiiDm_HQqbG98";
+const TOKEN = "8975199255:AAE0clzEOKDRwyDY09Hka7AG_wRH8MRW1i0";
 const ADMIN_IDS = [7285215691];
 const BOT_IMAGE = "https://www.jaky.dev/portfolio.jpeg";
 const PROVIDER = "☁️ JKSoft Cloud System";
