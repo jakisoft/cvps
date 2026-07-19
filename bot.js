@@ -7,17 +7,13 @@ const util = require("util");
 const os = require("os");
 const net = require("net");
 const http = require("http");
-const url = require("url");
 const execPromise = util.promisify(exec);
 
 const TOKEN = "8975199255:AAE0clzEOKDRwyDY09Hka7AG_wRH8MRW1i0";
 const ADMIN_IDS = [7285215691];
 const BOT_IMAGE = "https://www.jaky.dev/portfolio.jpeg";
 const PROVIDER = "☁️ JKSoft Cloud System";
-const DB_FILE = "/data/database.json";
-const WEB_PORT = 3000;
-
-const activeTokens = {};
+const DB_FILE = "./data/database.json";
 
 const OS_OPTIONS = [
     { key: "ubuntu22", name: "Ubuntu 22.04 LTS", emoji: "🐧", image: "ubuntu-vps:22.04" },
@@ -215,6 +211,10 @@ function getSession(userId) {
     return sessions[userId];
 }
 
+function shellQuote(value) {
+    return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
 function isAdmin(userId) {
     return ADMIN_IDS.includes(userId);
 }
@@ -283,22 +283,33 @@ async function startTmateSession(containerId) {
 }
 
 async function configureSSHAndSFTP(containerId, password) {
-    try {
-        await execPromise(`docker exec ${containerId} bash -c "
-            export DEBIAN_FRONTEND=noninteractive && \
-            apt-get update -y && \
-            apt-get install -y openssh-server -y && \
-            mkdir -p /var/run/sshd && \
-            echo 'Port 22' > /etc/ssh/sshd_config && \
-            echo 'Port 2222' >> /etc/ssh/sshd_config && \
-            echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
-            echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config && \
-            echo 'UsePAM no' >> /etc/ssh/sshd_config && \
-            echo 'root:${password}' | chpasswd || (echo '${password}'; echo '${password}') | passwd root && \
-            ssh-keygen -A && \
-            service ssh restart || /usr/sbin/sshd -D &
-        "`);
-    } catch {}
+    const quotedPassword = shellQuote(password);
+    const sshdConfig = [
+        "Port 22",
+        "Port 2222",
+        "ListenAddress 0.0.0.0",
+        "PermitRootLogin yes",
+        "PasswordAuthentication yes",
+        "KbdInteractiveAuthentication no",
+        "UsePAM yes",
+        "Subsystem sftp /usr/lib/openssh/sftp-server"
+    ].join("\n");
+    const quotedConfig = shellQuote(sshdConfig);
+
+    await execPromise(`docker exec ${containerId} bash -lc ${shellQuote(`
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y
+        apt-get install -y openssh-server
+        mkdir -p /var/run/sshd /run/sshd
+        printf '%s\n' root:${quotedPassword} | chpasswd
+        printf '%s\n' ${quotedConfig} > /etc/ssh/sshd_config
+        ssh-keygen -A
+        pkill sshd 2>/dev/null || true
+        /usr/sbin/sshd
+        ss -ltn | grep -q ':22 '
+        ss -ltn | grep -q ':2222 '
+    `)}`);
 }
 
 async function getDashboardText() {
@@ -600,7 +611,7 @@ bot.action("execute_deploy", async (ctx) => {
             HOST_PUBLIC_IP
         );
 
-        const cmd = `docker run -d --name vps_${vps.id} -p ${sshPort}:22 -p ${sftpPort}:2222 --privileged ${osData.image}`;
+        const cmd = `docker run -d --name vps_${vps.id} -p 0.0.0.0:${sshPort}:22 -p 0.0.0.0:${sftpPort}:2222 --privileged ${osData.image} tail -f /dev/null`;
         const { stdout } = await execPromise(cmd);
         vps.containerId = stdout.trim();
         vps.status = "running";
@@ -758,12 +769,7 @@ async function renderVPSManagement(ctx, vpsId, isRefresh = false) {
     const createdDate = new Date(vps.createdAt).toLocaleString();
     const statusText = vps.status === "running" ? "🟢 Running" : "🔴 Stopped";
 
-    const token = crypto.randomBytes(16).toString("hex");
-    activeTokens[token] = { vpsId: vps.id, userId: userId, createdAt: Date.now() };
-
     await getPublicIP();
-    const resetUrl = `http://${HOST_PUBLIC_IP}:${WEB_PORT}/reset?token=${token}`;
-
     let text = `<b>🛠️ KELOLA VPS: <code>${vps.id}</code></b>\n` +
                `━━━━━━━━━━━━━━━━━━━━\n` +
                `🟢 <b>Status Server:</b> <code>${statusText}</code>\n` +
@@ -794,7 +800,6 @@ async function renderVPSManagement(ctx, vpsId, isRefresh = false) {
             Markup.button.callback("🌀 Reboot VPS", `reboot_vps_${vps.id}`)
         ],
         [
-            Markup.button.webApp("🔑 Reset New Password", resetUrl),
             Markup.button.callback("🔑 Regen SSH", `regen_ssh_${vps.id}`)
         ],
         [
@@ -980,338 +985,17 @@ bot.catch((err) => {
     console.error("Fatal Bot error:", err);
 });
 
-function getWebPageHTML(vpsId, userId, token, isValid) {
-    return `<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reset Password VPS</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700;800&display=swap" rel="stylesheet">
-    <style>
-        body {
-            background-color: #f0f0f0;
-            background-image: radial-gradient(#000000 1.5px, #f0f0f0 1.5px);
-            background-size: 20px 20px;
-            font-family: 'Space Grotesk', sans-serif;
-            color: #000000;
-        }
-        .neo-card {
-            border: 4px solid #000000;
-            box-shadow: 8px 8px 0px 0px #000000;
-            background-color: #ffffff;
-            transition: all 0.2s ease;
-        }
-        .neo-card-success {
-            border: 4px solid #000000;
-            box-shadow: 8px 8px 0px 0px #000000;
-            background-color: #ffffff;
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
-        }
-        .neo-card-success:hover {
-            transform: translate(-4px, -4px);
-            box-shadow: 12px 12px 0px 0px #000000;
-        }
-        .neo-input {
-            border: 3px solid #000000;
-            background-color: #ffffff;
-            transition: transform 0.1s ease, box-shadow 0.1s ease;
-        }
-        .neo-input:focus {
-            outline: none;
-            box-shadow: 4px 4px 0px 0px #000000;
-            background-color: #feffd9;
-        }
-        .neo-btn {
-            border: 3px solid #000000;
-            box-shadow: 5px 5px 0px 0px #000000;
-            transition: all 0.15s ease-in-out;
-        }
-        .neo-btn:hover {
-            transform: translate(-2px, -2px);
-            box-shadow: 7px 7px 0px 0px #000000;
-        }
-        .neo-btn:active {
-            transform: translate(3px, 3px);
-            box-shadow: 2px 2px 0px 0px #000000;
-        }
-        .neo-toast {
-            border: 4px solid #000000;
-            box-shadow: 6px 6px 0px 0px #000000;
-            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-        }
-    </style>
-</head>
-<body class="p-4 flex flex-col justify-between min-h-screen">
-
-    <div id="customToast" class="fixed top-4 left-1/2 -translate-x-1/2 z-50 p-4 neo-toast font-black flex items-center space-x-3 hidden transform -translate-y-20 opacity-0">
-        <div id="toastIcon"></div>
-        <span id="toastText" class="text-sm"></span>
-    </div>
-
-    <div class="w-full max-w-md mx-auto my-auto">
-        ${isValid ? `
-        <div class="neo-card p-6 md:p-8 rounded-none relative">
-            <div class="absolute -top-4 -left-4 bg-[#FF4F81] border-4 border-black text-white px-4 py-1 font-extrabold text-sm uppercase tracking-wider shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
-                SECURITY
-            </div>
-            
-            <div class="text-center mt-4 mb-8">
-                <div class="inline-flex items-center justify-center w-16 h-16 rounded-none bg-[#00FF66] border-4 border-black mb-4 shadow-[4px_4px_0px_0px_#000000] text-black">
-                    <i data-lucide="shield-alert" class="w-8 h-8"></i>
-                </div>
-                <h2 class="text-2xl font-extrabold tracking-tight uppercase">Reset Password</h2>
-                <p class="text-sm font-bold text-gray-700 mt-2 bg-[#A0E9FF] border-2 border-black inline-block px-3 py-1">
-                    ID VPS: <span class="font-mono text-black font-extrabold">${vpsId}</span>
-                </p>
-            </div>
-
-            <form id="resetForm" class="space-y-6" onsubmit="event.preventDefault(); submitReset();">
-                <div class="relative">
-                    <label class="block text-xs font-black uppercase tracking-wider mb-2 text-black">Password Baru</label>
-                    <div class="relative">
-                        <span class="absolute left-4 top-1/2 -translate-y-1/2 z-20 flex items-center justify-center pointer-events-none">
-                            <i data-lucide="key-round" class="w-5 h-5 text-black"></i>
-                        </span>
-                        <input type="password" id="newPassword" class="neo-input w-full pl-12 pr-12 py-3.5 text-sm font-mono font-bold text-black" placeholder="Password baru..." required>
-                        <button type="button" onclick="toggleVisibility('newPassword', 'eyeOn1', 'eyeOff1')" class="absolute right-4 top-1/2 -translate-y-1/2 z-20 flex items-center justify-center text-black hover:scale-115 active:scale-95 transition-transform bg-transparent border-0 focus:outline-none">
-                            <span id="eyeOff1" class="flex"><i data-lucide="eye-off" class="w-5 h-5"></i></span>
-                            <span id="eyeOn1" class="hidden"><i data-lucide="eye" class="w-5 h-5"></i></span>
-                        </button>
-                    </div>
-                </div>
-
-                <div class="relative">
-                    <label class="block text-xs font-black uppercase tracking-wider mb-2 text-black">Ulangi Password</label>
-                    <div class="relative">
-                        <span class="absolute left-4 top-1/2 -translate-y-1/2 z-20 flex items-center justify-center pointer-events-none">
-                            <i data-lucide="key-round" class="w-5 h-5 text-black"></i>
-                        </span>
-                        <input type="password" id="confirmPassword" class="neo-input w-full pl-12 pr-12 py-3.5 text-sm font-mono font-bold text-black" placeholder="Ulangi password..." required>
-                        <button type="button" onclick="toggleVisibility('confirmPassword', 'eyeOn2', 'eyeOff2')" class="absolute right-4 top-1/2 -translate-y-1/2 z-20 flex items-center justify-center text-black hover:scale-115 active:scale-95 transition-transform bg-transparent border-0 focus:outline-none">
-                            <span id="eyeOff2" class="flex"><i data-lucide="eye-off" class="w-5 h-5"></i></span>
-                            <span id="eyeOn2" class="hidden"><i data-lucide="eye" class="w-5 h-5"></i></span>
-                        </button>
-                    </div>
-                </div>
-
-                <button type="submit" id="submitBtn" class="neo-btn w-full bg-[#FFD214] text-black font-extrabold py-3.5 px-4 rounded-none uppercase tracking-wider flex items-center justify-center space-x-2 text-sm">
-                    <i data-lucide="check-circle-2" class="w-5 h-5"></i>
-                    <span>Perbarui Password</span>
-                </button>
-            </form>
-
-            <div id="successCard" class="hidden text-center p-6 bg-[#00FF66] border-4 border-black shadow-[5px_5px_0px_0px_rgba(0,0,0,1)] mt-4">
-                <i data-lucide="party-popper" class="w-12 h-12 text-black mx-auto mb-3 animate-bounce"></i>
-                <h3 class="font-extrabold text-lg uppercase tracking-tight">Sukses Diperbarui!</h3>
-                <p class="text-sm font-bold text-gray-800 mt-2">Anda sekarang dapat menutup halaman ini dan kembali ke Telegram.</p>
-            </div>
-        </div>
-        ` : `
-        <div class="neo-card-success p-6 md:p-8 rounded-none relative">
-            <div class="absolute -top-4 -left-4 bg-[#00FF66] border-4 border-black text-black px-4 py-1 font-extrabold text-sm uppercase tracking-wider shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
-                INFO SYSTEM
-            </div>
-            <div class="text-center mt-4">
-                <div class="inline-flex items-center justify-center w-16 h-16 rounded-none bg-[#FFD214] border-4 border-black mb-4 shadow-[4px_4px_0px_0px_#000000] text-black">
-                    <i data-lucide="shield-check" class="w-8 h-8"></i>
-                </div>
-                <h2 class="text-2xl font-extrabold tracking-tight uppercase">Sesi Selesai</h2>
-                <div class="p-4 bg-[#A0E9FF] border-3 border-black text-left mt-6 font-bold text-sm leading-relaxed shadow-[3px_3px_0px_0px_#000000]">
-                    Password berhasil diganti / Token reset ini telah digunakan atau tidak valid.<br><br>
-                    Silakan kembali ke Telegram dan gunakan password baru Anda untuk masuk ke VPS.
-                </div>
-                <button onclick="window.Telegram.WebApp.close();" class="neo-btn mt-6 w-full bg-[#FF4F81] text-white font-extrabold py-3 px-4 rounded-none uppercase tracking-wider flex items-center justify-center space-x-2 text-sm">
-                    <i data-lucide="log-out" class="w-5 h-5"></i>
-                    <span>Keluar Web App</span>
-                </button>
-            </div>
-        </div>
-        `}
-    </div>
-
-    <p class="text-center font-extrabold text-xs uppercase tracking-widest text-black mt-8 bg-white border-2 border-black py-2 inline-block mx-auto px-4 shadow-[3px_3px_0px_0px_#000000]">
-        Sistem Enkripsi • ${PROVIDER}
-    </p>
-
-    <script>
-        const tg = window.Telegram.WebApp;
-        tg.ready();
-        tg.expand();
-        lucide.createIcons();
-
-        function showToast(message, type = 'error') {
-            const toast = document.getElementById('customToast');
-            const toastText = document.getElementById('toastText');
-            const toastIcon = document.getElementById('toastIcon');
-            
-            toastText.innerText = message;
-            toast.className = "fixed top-4 left-1/2 -translate-x-1/2 z-50 p-4 neo-toast font-black flex items-center space-x-3 rounded-none transform transition-all duration-300";
-            
-            if (type === 'success') {
-                toast.classList.add('bg-[#00FF66]');
-                toastIcon.innerHTML = '<i data-lucide="check-circle" class="w-6 h-6 text-black"></i>';
-            } else {
-                toast.classList.add('bg-[#FF4F81]');
-                toastIcon.innerHTML = '<i data-lucide="alert-triangle" class="w-6 h-6 text-black"></i>';
-            }
-            lucide.createIcons();
-            
-            toast.classList.remove('hidden', '-translate-y-20', 'opacity-0');
-            toast.classList.add('translate-y-0', 'opacity-100');
-            
-            setTimeout(() => {
-                toast.classList.remove('translate-y-0', 'opacity-100');
-                toast.classList.add('-translate-y-20', 'opacity-0');
-                setTimeout(() => toast.classList.add('hidden'), 300);
-            }, 3000);
-        }
-
-        function toggleVisibility(inputId, eyeOnId, eyeOffId) {
-            const input = document.getElementById(inputId);
-            const eyeOn = document.getElementById(eyeOnId);
-            const eyeOff = document.getElementById(eyeOffId);
-            if (input.type === "password") {
-                input.type = "text";
-                eyeOn.classList.remove("hidden");
-                eyeOff.classList.add("hidden");
-            } else {
-                input.type = "password";
-                eyeOn.classList.add("hidden");
-                eyeOff.classList.remove("hidden");
-            }
-        }
-
-        async function submitReset() {
-            const pass = document.getElementById("newPassword").value;
-            const confirm = document.getElementById("confirmPassword").value;
-            const submitBtn = document.getElementById("submitBtn");
-            const form = document.getElementById("resetForm");
-            const successCard = document.getElementById("successCard");
-
-            if (pass.length < 8) {
-                showToast("Password minimal terdiri dari 8 karakter!", "error");
-                return;
-            }
-
-            if (pass !== confirm) {
-                showToast("Konfirmasi password tidak cocok!", "error");
-                return;
-            }
-
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<i data-lucide="loader" class="w-5 h-5 animate-spin"></i><span>Memproses...</span>';
-            lucide.createIcons();
-
-            try {
-                const response = await fetch("/api/reset-password", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        token: "${token}",
-                        password: pass
-                    })
-                });
-                const resData = await response.json();
-                if (resData.success) {
-                    showToast("Password berhasil diperbarui!", "success");
-                    form.classList.add("hidden");
-                    successCard.classList.remove("hidden");
-                    setTimeout(() => {
-                        tg.close();
-                    }, 3000);
-                } else {
-                    showToast("Gagal memproses: " + (resData.error || "Unknown"), "error");
-                    submitBtn.disabled = false;
-                    submitBtn.innerHTML = '<i data-lucide="check-circle-2" class="w-5 h-5"></i><span>Perbarui Password</span>';
-                    lucide.createIcons();
-                }
-            } catch (err) {
-                showToast("Gagal menghubungkan ke server!", "error");
-                submitBtn.disabled = false;
-                submitBtn.innerHTML = '<i data-lucide="check-circle-2" class="w-5 h-5"></i><span>Perbarui Password</span>';
-                lucide.createIcons();
-            }
-        }
-    </script>
-</body>
-</html>`;
-}
-
-const server = http.createServer(async (req, res) => {
-    const parsedUrl = url.parse(req.url, true);
-    if (parsedUrl.pathname === "/reset") {
-        const { token } = parsedUrl.query;
-        const tokenData = activeTokens[token];
-        
-        if (tokenData) {
-            res.writeHead(200, { "Content-Type": "text/html" });
-            res.end(getWebPageHTML(tokenData.vpsId, tokenData.userId, token, true));
-        } else {
-            res.writeHead(200, { "Content-Type": "text/html" });
-            res.end(getWebPageHTML("", "", "", false));
-        }
-    } else if (parsedUrl.pathname === "/api/reset-password" && req.method === "POST") {
-        let body = "";
-        req.on("data", chunk => body += chunk);
-        req.on("end", async () => {
-            try {
-                const { token, password } = JSON.parse(body);
-                const tokenData = activeTokens[token];
-
-                if (!tokenData) {
-                    res.writeHead(400, { "Content-Type": "application/json" });
-                    return res.end(JSON.stringify({ success: false, error: "Sesi token tidak valid atau kedaluwarsa." }));
-                }
-
-                const { vpsId, userId } = tokenData;
-                const vps = db.getVPS(vpsId);
-
-                if (vps && vps.containerId) {
-                    await execPromise(`docker exec ${vps.containerId} bash -c "echo 'root:${password}' | chpasswd || (echo '${password}'; echo '${password}') | passwd root && service ssh restart || /usr/sbin/sshd -D &"`);
-                    vps.password = password;
-                    await db.save();
-
-                    delete activeTokens[token];
-
-                    await bot.telegram.sendMessage(userId, `<b>🔑 PASSWORD VPS DIRESET!</b>\n━━━━━━━━━━━━━━━━━━━━\n🆔 <b>ID VPS:</b> <code>${vpsId}</code>\n🔑 <b>Password Baru:</b> <code>${password}</code>\n━━━━━━━━━━━━━━━━━━━━`, { parse_mode: "HTML" });
-                    res.writeHead(200, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ success: true }));
-                } else {
-                    res.writeHead(400, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ success: false, error: "VPS target tidak ditemukan" }));
-                }
-            } catch (err) {
-                res.writeHead(500, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ success: false, error: err.message }));
-            }
-        });
-    } else {
-        res.writeHead(404);
-        res.end();
-    }
-});
-
 (async () => {
     await db.load();
     await getPublicIP();
     
-    server.listen(WEB_PORT, "0.0.0.0", () => {
-        console.log(`📡 Built-in Webapp Server listening on http://0.0.0.0:${WEB_PORT}`);
-    });
-
     await bot.launch();
     console.log("🚀 JKSoft-VpsFree (Owner Version) Berhasil dijalankan!");
 })();
 
 process.once("SIGINT", () => {
-    server.close();
     bot.stop("SIGINT");
 });
 process.once("SIGTERM", () => {
-    server.close();
     bot.stop("SIGTERM");
 });
