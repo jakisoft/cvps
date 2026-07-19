@@ -237,6 +237,77 @@ async function closeHostVPSPorts(sshPort, sftpPort) {
     await closeHostPort(sftpPort);
 }
 
+async function enableHostForwarding() {
+    const commands = [
+        "sysctl -w net.ipv4.ip_forward=1 >/dev/null",
+        "grep -q '^net.ipv4.ip_forward=1$' /etc/sysctl.conf 2>/dev/null || printf '%s\n' 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf"
+    ];
+
+    for (const command of commands) {
+        try {
+            await execPromise(command);
+        } catch {}
+    }
+}
+
+async function getContainerIPAddress(containerId) {
+    const { stdout } = await execPromise(`docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${containerId}`);
+    return stdout.trim();
+}
+
+async function addNATRule(hostPort, containerIP, containerPort) {
+    const commands = [
+        `iptables -t nat -C PREROUTING -p tcp --dport ${hostPort} -j DNAT --to-destination ${containerIP}:${containerPort} 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport ${hostPort} -j DNAT --to-destination ${containerIP}:${containerPort}`,
+        `iptables -t nat -C OUTPUT -p tcp -d 127.0.0.1 --dport ${hostPort} -j DNAT --to-destination ${containerIP}:${containerPort} 2>/dev/null || iptables -t nat -A OUTPUT -p tcp -d 127.0.0.1 --dport ${hostPort} -j DNAT --to-destination ${containerIP}:${containerPort}`,
+        `iptables -C FORWARD -p tcp -d ${containerIP} --dport ${containerPort} -j ACCEPT 2>/dev/null || iptables -A FORWARD -p tcp -d ${containerIP} --dport ${containerPort} -j ACCEPT`,
+        `iptables -t nat -C POSTROUTING -s ${containerIP}/32 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${containerIP}/32 -j MASQUERADE`
+    ];
+
+    for (const command of commands) {
+        try {
+            await execPromise(command);
+        } catch {}
+    }
+}
+
+async function removeNATRule(hostPort, containerIP, containerPort) {
+    const commands = [
+        `while iptables -t nat -C PREROUTING -p tcp --dport ${hostPort} -j DNAT --to-destination ${containerIP}:${containerPort} 2>/dev/null; do iptables -t nat -D PREROUTING -p tcp --dport ${hostPort} -j DNAT --to-destination ${containerIP}:${containerPort}; done`,
+        `while iptables -t nat -C OUTPUT -p tcp -d 127.0.0.1 --dport ${hostPort} -j DNAT --to-destination ${containerIP}:${containerPort} 2>/dev/null; do iptables -t nat -D OUTPUT -p tcp -d 127.0.0.1 --dport ${hostPort} -j DNAT --to-destination ${containerIP}:${containerPort}; done`,
+        `while iptables -C FORWARD -p tcp -d ${containerIP} --dport ${containerPort} -j ACCEPT 2>/dev/null; do iptables -D FORWARD -p tcp -d ${containerIP} --dport ${containerPort} -j ACCEPT; done`,
+        `while iptables -t nat -C POSTROUTING -s ${containerIP}/32 -j MASQUERADE 2>/dev/null; do iptables -t nat -D POSTROUTING -s ${containerIP}/32 -j MASQUERADE; done`
+    ];
+
+    for (const command of commands) {
+        try {
+            await execPromise(command);
+        } catch {}
+    }
+}
+
+async function ensureContainerNATForwarding(containerId, sshPort, sftpPort) {
+    await enableHostForwarding();
+    const containerIP = await getContainerIPAddress(containerId);
+    if (!containerIP) {
+        throw new Error("IP internal container tidak ditemukan untuk NAT forwarding.");
+    }
+
+    await addNATRule(sshPort, containerIP, 22);
+    await addNATRule(sftpPort, containerIP, 2222);
+}
+
+async function removeContainerNATForwarding(containerId, sshPort, sftpPort) {
+    try {
+        const containerIP = await getContainerIPAddress(containerId);
+        if (!containerIP) {
+            return;
+        }
+
+        await removeNATRule(sshPort, containerIP, 22);
+        await removeNATRule(sftpPort, containerIP, 2222);
+    } catch {}
+}
+
 function generateRandomPassword() {
     const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     const lower = "abcdefghijklmnopqrstuvwxyz";
@@ -332,11 +403,11 @@ async function startTmateSession(containerId) {
     }
 }
 
-async function configureSSHAndSFTP(containerId, password, sshPort = 22, sftpPort = 2222) {
+async function configureSSHAndSFTP(containerId, password) {
     const quotedPassword = shellQuote(password);
-    const sshdPorts = [...new Set([22, 2222, Number(sshPort), Number(sftpPort)].filter(port => Number.isInteger(port) && port > 0))];
     const sshdConfig = [
-        ...sshdPorts.map(port => `Port ${port}`),
+        "Port 22",
+        "Port 2222",
         "ListenAddress 0.0.0.0",
         "PermitRootLogin yes",
         "PasswordAuthentication yes",
@@ -359,8 +430,6 @@ async function configureSSHAndSFTP(containerId, password, sshPort = 22, sftpPort
         /usr/sbin/sshd
         ss -ltn | grep -q ':22 '
         ss -ltn | grep -q ':2222 '
-        ss -ltn | grep -q ':${sshPort} '
-        ss -ltn | grep -q ':${sftpPort} '
     `)}`);
 }
 
@@ -665,13 +734,14 @@ bot.action("execute_deploy", async (ctx) => {
 
         await openHostVPSPorts(sshPort, sftpPort);
 
-        const cmd = `docker run -d --name vps_${vps.id} -p 0.0.0.0:${sshPort}:${sshPort} -p 0.0.0.0:${sftpPort}:${sftpPort} --privileged ${osData.image} tail -f /dev/null`;
+        const cmd = `docker run -d --name vps_${vps.id} -p 0.0.0.0:${sshPort}:22 -p 0.0.0.0:${sftpPort}:2222 --privileged ${osData.image} tail -f /dev/null`;
         const { stdout } = await execPromise(cmd);
         vps.containerId = stdout.trim();
         vps.status = "running";
         await db.save();
 
-        await configureSSHAndSFTP(vps.containerId, password, sshPort, sftpPort);
+        await configureSSHAndSFTP(vps.containerId, password);
+        await ensureContainerNATForwarding(vps.containerId, sshPort, sftpPort);
         const sshCommand = await startTmateSession(vps.containerId);
 
         if (sshCommand) {
@@ -826,6 +896,9 @@ async function renderVPSManagement(ctx, vpsId, isRefresh = false) {
     await getPublicIP();
     if (vps.sshPort && vps.sftpPort) {
         await openHostVPSPorts(vps.sshPort, vps.sftpPort);
+        if (vps.containerId && vps.status === "running") {
+            await ensureContainerNATForwarding(vps.containerId, vps.sshPort, vps.sftpPort);
+        }
     }
 
     let text = `<b>🛠️ KELOLA VPS: <code>${vps.id}</code></b>\n` +
@@ -898,7 +971,8 @@ bot.action(/^reboot_vps_(.+)$/, async (ctx) => {
     try {
         await execPromise(`docker restart ${vps.containerId}`);
         await openHostVPSPorts(vps.sshPort, vps.sftpPort);
-        await configureSSHAndSFTP(vps.containerId, vps.password, vps.sshPort, vps.sftpPort);
+        await configureSSHAndSFTP(vps.containerId, vps.password);
+        await ensureContainerNATForwarding(vps.containerId, vps.sshPort, vps.sftpPort);
         const sshCommand = await startTmateSession(vps.containerId);
         if (sshCommand) {
             vps.sshCommand = sshCommand;
@@ -1016,6 +1090,7 @@ bot.action(/^execute_delete_vps_(.+)$/, async (ctx) => {
     if (vps) {
         if (vps.containerId) {
             try {
+                await removeContainerNATForwarding(vps.containerId, vps.sshPort, vps.sftpPort);
                 await execPromise(`docker stop ${vps.containerId} 2>/dev/null || true`);
                 await execPromise(`docker rm ${vps.containerId} 2>/dev/null || true`);
                 await closeHostVPSPorts(vps.sshPort, vps.sftpPort);
