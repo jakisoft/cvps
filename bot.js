@@ -282,11 +282,11 @@ async function startTmateSession(containerId) {
     }
 }
 
-async function configureSSHAndSFTP(containerId, password) {
+async function configureSSHAndSFTP(containerId, password, sshPort = 22, sftpPort = 2222) {
     const quotedPassword = shellQuote(password);
+    const sshdPorts = [...new Set([22, 2222, Number(sshPort), Number(sftpPort)].filter(port => Number.isInteger(port) && port > 0))];
     const sshdConfig = [
-        "Port 22",
-        "Port 2222",
+        ...sshdPorts.map(port => `Port ${port}`),
         "ListenAddress 0.0.0.0",
         "PermitRootLogin yes",
         "PasswordAuthentication yes",
@@ -300,7 +300,7 @@ async function configureSSHAndSFTP(containerId, password) {
         set -e
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -y
-        apt-get install -y openssh-server
+        apt-get install -y openssh-server iproute2
         mkdir -p /var/run/sshd /run/sshd
         printf '%s\n' root:${quotedPassword} | chpasswd
         printf '%s\n' ${quotedConfig} > /etc/ssh/sshd_config
@@ -309,6 +309,8 @@ async function configureSSHAndSFTP(containerId, password) {
         /usr/sbin/sshd
         ss -ltn | grep -q ':22 '
         ss -ltn | grep -q ':2222 '
+        ss -ltn | grep -q ':${sshPort} '
+        ss -ltn | grep -q ':${sftpPort} '
     `)}`);
 }
 
@@ -611,13 +613,13 @@ bot.action("execute_deploy", async (ctx) => {
             HOST_PUBLIC_IP
         );
 
-        const cmd = `docker run -d --name vps_${vps.id} -p 0.0.0.0:${sshPort}:22 -p 0.0.0.0:${sftpPort}:2222 --privileged ${osData.image} tail -f /dev/null`;
+        const cmd = `docker run -d --name vps_${vps.id} -p 0.0.0.0:${sshPort}:${sshPort} -p 0.0.0.0:${sftpPort}:${sftpPort} --privileged ${osData.image} tail -f /dev/null`;
         const { stdout } = await execPromise(cmd);
         vps.containerId = stdout.trim();
         vps.status = "running";
         await db.save();
 
-        await configureSSHAndSFTP(vps.containerId, password);
+        await configureSSHAndSFTP(vps.containerId, password, sshPort, sftpPort);
         const sshCommand = await startTmateSession(vps.containerId);
 
         if (sshCommand) {
@@ -800,9 +802,7 @@ async function renderVPSManagement(ctx, vpsId, isRefresh = false) {
             Markup.button.callback("🌀 Reboot VPS", `reboot_vps_${vps.id}`)
         ],
         [
-            Markup.button.callback("🔑 Regen SSH", `regen_ssh_${vps.id}`)
-        ],
-        [
+            Markup.button.callback("🔑 Regen SSH", `regen_ssh_${vps.id}`),
             Markup.button.callback("🗑️ Hapus VPS", `confirm_delete_vps_${vps.id}`)
         ],
         [
@@ -841,7 +841,7 @@ bot.action(/^reboot_vps_(.+)$/, async (ctx) => {
 
     try {
         await execPromise(`docker restart ${vps.containerId}`);
-        await configureSSHAndSFTP(vps.containerId, vps.password);
+        await configureSSHAndSFTP(vps.containerId, vps.password, vps.sshPort, vps.sftpPort);
         const sshCommand = await startTmateSession(vps.containerId);
         if (sshCommand) {
             vps.sshCommand = sshCommand;
