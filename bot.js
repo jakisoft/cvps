@@ -187,6 +187,56 @@ async function generateValidPort() {
     }
 }
 
+async function openHostPort(port) {
+    const normalizedPort = Number(port);
+    if (!Number.isInteger(normalizedPort) || normalizedPort < 1 || normalizedPort > 65535) {
+        throw new Error(`Port host tidak valid: ${port}`);
+    }
+
+    const commands = [
+        `iptables -C INPUT -p tcp --dport ${normalizedPort} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport ${normalizedPort} -j ACCEPT`,
+        `ip6tables -C INPUT -p tcp --dport ${normalizedPort} -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p tcp --dport ${normalizedPort} -j ACCEPT`,
+        `if command -v ufw >/dev/null 2>&1 && ufw status | grep -qi active; then ufw allow ${normalizedPort}/tcp >/dev/null; fi`,
+        `if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd --permanent --add-port=${normalizedPort}/tcp >/dev/null && firewall-cmd --reload >/dev/null; fi`
+    ];
+
+    for (const command of commands) {
+        try {
+            await execPromise(command);
+        } catch {}
+    }
+}
+
+async function openHostVPSPorts(sshPort, sftpPort) {
+    await openHostPort(sshPort);
+    await openHostPort(sftpPort);
+}
+
+async function closeHostPort(port) {
+    const normalizedPort = Number(port);
+    if (!Number.isInteger(normalizedPort) || normalizedPort < 1 || normalizedPort > 65535) {
+        return;
+    }
+
+    const commands = [
+        `while iptables -C INPUT -p tcp --dport ${normalizedPort} -j ACCEPT 2>/dev/null; do iptables -D INPUT -p tcp --dport ${normalizedPort} -j ACCEPT; done`,
+        `while ip6tables -C INPUT -p tcp --dport ${normalizedPort} -j ACCEPT 2>/dev/null; do ip6tables -D INPUT -p tcp --dport ${normalizedPort} -j ACCEPT; done`,
+        `if command -v ufw >/dev/null 2>&1 && ufw status | grep -qi active; then ufw delete allow ${normalizedPort}/tcp >/dev/null 2>&1 || true; fi`,
+        `if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd --permanent --remove-port=${normalizedPort}/tcp >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true; fi`
+    ];
+
+    for (const command of commands) {
+        try {
+            await execPromise(command);
+        } catch {}
+    }
+}
+
+async function closeHostVPSPorts(sshPort, sftpPort) {
+    await closeHostPort(sshPort);
+    await closeHostPort(sftpPort);
+}
+
 function generateRandomPassword() {
     const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     const lower = "abcdefghijklmnopqrstuvwxyz";
@@ -613,6 +663,8 @@ bot.action("execute_deploy", async (ctx) => {
             HOST_PUBLIC_IP
         );
 
+        await openHostVPSPorts(sshPort, sftpPort);
+
         const cmd = `docker run -d --name vps_${vps.id} -p 0.0.0.0:${sshPort}:${sshPort} -p 0.0.0.0:${sftpPort}:${sftpPort} --privileged ${osData.image} tail -f /dev/null`;
         const { stdout } = await execPromise(cmd);
         vps.containerId = stdout.trim();
@@ -772,6 +824,10 @@ async function renderVPSManagement(ctx, vpsId, isRefresh = false) {
     const statusText = vps.status === "running" ? "🟢 Running" : "🔴 Stopped";
 
     await getPublicIP();
+    if (vps.sshPort && vps.sftpPort) {
+        await openHostVPSPorts(vps.sshPort, vps.sftpPort);
+    }
+
     let text = `<b>🛠️ KELOLA VPS: <code>${vps.id}</code></b>\n` +
                `━━━━━━━━━━━━━━━━━━━━\n` +
                `🟢 <b>Status Server:</b> <code>${statusText}</code>\n` +
@@ -841,6 +897,7 @@ bot.action(/^reboot_vps_(.+)$/, async (ctx) => {
 
     try {
         await execPromise(`docker restart ${vps.containerId}`);
+        await openHostVPSPorts(vps.sshPort, vps.sftpPort);
         await configureSSHAndSFTP(vps.containerId, vps.password, vps.sshPort, vps.sftpPort);
         const sshCommand = await startTmateSession(vps.containerId);
         if (sshCommand) {
@@ -961,6 +1018,7 @@ bot.action(/^execute_delete_vps_(.+)$/, async (ctx) => {
             try {
                 await execPromise(`docker stop ${vps.containerId} 2>/dev/null || true`);
                 await execPromise(`docker rm ${vps.containerId} 2>/dev/null || true`);
+                await closeHostVPSPorts(vps.sshPort, vps.sftpPort);
             } catch {}
         }
         await db.deleteVPS(vpsId);
