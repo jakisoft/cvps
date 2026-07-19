@@ -123,11 +123,44 @@ const bot = new Telegraf(TOKEN);
 const sessions = {};
 let HOST_PUBLIC_IP = "127.0.0.1";
 
+function fetchPublicIP() {
+    return new Promise((resolve) => {
+        const options = {
+            host: "api.ipify.org",
+            port: 80,
+            path: "/",
+            timeout: 5000
+        };
+        http.get(options, (res) => {
+            let data = "";
+            res.on("data", (chunk) => data += chunk);
+            res.on("end", () => {
+                const ip = data.trim();
+                if (ip) resolve(ip);
+                else resolve("127.0.0.1");
+            });
+        }).on("error", () => {
+            http.get({ host: "ifconfig.me", port: 80, path: "/", timeout: 5000 }, (res2) => {
+                let data2 = "";
+                res2.on("data", (chunk) => data2 += chunk);
+                res2.on("end", () => {
+                    resolve(data2.trim() || "127.0.0.1");
+                });
+            }).on("error", () => resolve("127.0.0.1"));
+        });
+    });
+}
+
 async function getPublicIP() {
     try {
-        const { stdout } = await execPromise("curl -s ifconfig.me || curl -s api.ipify.org");
-        if (stdout.trim()) {
-            HOST_PUBLIC_IP = stdout.trim();
+        const ip = await fetchPublicIP();
+        if (ip && ip !== "127.0.0.1") {
+            HOST_PUBLIC_IP = ip;
+        } else {
+            const { stdout } = await execPromise("curl -s ifconfig.me || curl -s api.ipify.org");
+            if (stdout.trim()) {
+                HOST_PUBLIC_IP = stdout.trim();
+            }
         }
     } catch {}
 }
@@ -135,8 +168,8 @@ async function getPublicIP() {
 function checkPortAvailable(port) {
     return new Promise((resolve) => {
         const server = net.createServer();
-        server.once('error', () => resolve(false));
-        server.once('listening', () => {
+        server.once("error", () => resolve(false));
+        server.once("listening", () => {
             server.close();
             resolve(true);
         });
@@ -172,7 +205,7 @@ function generateRandomPassword() {
     for (let i = 0; i < 6; i++) {
         password += all[crypto.randomInt(0, all.length)];
     }
-    return password.split('').sort(() => 0.5 - Math.random()).join('');
+    return password.split("").sort(() => 0.5 - Math.random()).join("");
 }
 
 function getSession(userId) {
@@ -252,15 +285,15 @@ async function startTmateSession(containerId) {
 async function configureSSHAndSFTP(containerId, password) {
     try {
         await execPromise(`docker exec ${containerId} bash -c "
+            export DEBIAN_FRONTEND=noninteractive && \
             apt-get update -y && \
             apt-get install -y openssh-server -y && \
             mkdir -p /var/run/sshd && \
-            sed -i 's/#Port 22/Port 22/' /etc/ssh/sshd_config && \
+            echo 'Port 22' > /etc/ssh/sshd_config && \
             echo 'Port 2222' >> /etc/ssh/sshd_config && \
-            sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
-            sed -i 's/PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
             echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
             echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config && \
+            echo 'UsePAM no' >> /etc/ssh/sshd_config && \
             echo 'root:${password}' | chpasswd || (echo '${password}'; echo '${password}') | passwd root && \
             ssh-keygen -A && \
             service ssh restart || /usr/sbin/sshd -D &
@@ -559,7 +592,6 @@ bot.action("execute_deploy", async (ctx) => {
         const vps = await db.createVPS(
             session.selectedOS,
             session.selectedRAM,
-            session.selectedRAM,
             session.selectedDisk,
             session.selectedCPU,
             sshPort,
@@ -663,7 +695,8 @@ bot.action("list_vps", async (ctx) => {
         const osData = OS_OPTIONS.find(o => o.key === vps.os);
         const statusEmoji = vps.status === "running" ? "🟢" : "🔴";
         text += `${index + 1}. <b>${statusEmoji} ID: <code>${vps.id}</code></b>\n` +
-                `   └ 📦 OS: <code>${osData ? osData.name : vps.os}</code>\n\n`;
+                `   ├ 📦 OS: <code>${osData ? osData.name : vps.os}</code>\n` +
+                `   └ 🌐 IP Host: <code>${vps.ipAddress || HOST_PUBLIC_IP}</code>\n\n`;
     });
     text += `━━━━━━━━━━━━━━━━━━━━\n<i>Pilih nomor di bawah ini untuk mengelola VPS Anda secara spesifik.</i>`;
 
@@ -725,6 +758,12 @@ async function renderVPSManagement(ctx, vpsId, isRefresh = false) {
     const createdDate = new Date(vps.createdAt).toLocaleString();
     const statusText = vps.status === "running" ? "🟢 Running" : "🔴 Stopped";
 
+    const token = crypto.randomBytes(16).toString("hex");
+    activeTokens[token] = { vpsId: vps.id, userId: userId, createdAt: Date.now() };
+
+    await getPublicIP();
+    const resetUrl = `http://${HOST_PUBLIC_IP}:${WEB_PORT}/reset?token=${token}`;
+
     let text = `<b>🛠️ KELOLA VPS: <code>${vps.id}</code></b>\n` +
                `━━━━━━━━━━━━━━━━━━━━\n` +
                `🟢 <b>Status Server:</b> <code>${statusText}</code>\n` +
@@ -755,7 +794,7 @@ async function renderVPSManagement(ctx, vpsId, isRefresh = false) {
             Markup.button.callback("🌀 Reboot VPS", `reboot_vps_${vps.id}`)
         ],
         [
-            Markup.button.callback("⚙️ Settings VPS", `settings_vps_${vps.id}`),
+            Markup.button.webApp("🔑 Reset New Password", resetUrl),
             Markup.button.callback("🔑 Regen SSH", `regen_ssh_${vps.id}`)
         ],
         [
@@ -815,49 +854,6 @@ bot.action(/^reboot_vps_(.+)$/, async (ctx) => {
             }
         );
     }
-});
-
-bot.action(/^settings_vps_(.+)$/, async (ctx) => {
-    const vpsId = ctx.match[1];
-    await ctx.answerCbQuery();
-    const vps = db.getVPS(vpsId);
-
-    if (!vps) {
-        return ctx.editMessageCaption(
-            `<b>❌ VPS TIDAK DITEMUKAN</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
-            `Data VPS tidak valid atau sudah dihapus.`,
-            {
-                parse_mode: "HTML",
-                ...Markup.inlineKeyboard([[Markup.button.callback("📋 Kembali", "list_vps")]])
-            }
-        );
-    }
-
-    const token = crypto.randomBytes(16).toString("hex");
-    activeTokens[token] = { vpsId: vps.id, userId: ctx.from.id, createdAt: Date.now() };
-
-    await getPublicIP();
-    const resetUrl = `http://${HOST_PUBLIC_IP}:${WEB_PORT}/reset?token=${token}`;
-
-    let text = `<b>⚙️ SETTINGS VPS: <code>${vps.id}</code></b>\n` +
-               `━━━━━━━━━━━━━━━━━━━━\n` +
-               `Silakan pilih opsi konfigurasi untuk kontainer Anda:\n\n` +
-               `🔑 <b>Reset Password:</b> Membuka popup Web App untuk menginput password baru secara visual.\n` +
-               `🔄 <b>Kembali:</b> Kembali ke menu dashboard manajemen VPS Anda.`;
-
-    const buttons = [
-        [
-            Markup.button.webApp("🔑 Reset Password", resetUrl)
-        ],
-        [
-            Markup.button.callback("↩️ Kembali ke Dashboard VPS", `manage_vps_${vps.id}`)
-        ]
-    ];
-
-    await ctx.editMessageCaption(text, {
-        parse_mode: "HTML",
-        ...Markup.inlineKeyboard(buttons)
-    });
 });
 
 bot.action(/^regen_ssh_(.+)$/, async (ctx) => {
@@ -1109,7 +1105,7 @@ function getWebPageHTML(vpsId, userId, token, isValid) {
             </form>
 
             <div id="successCard" class="hidden text-center p-6 bg-[#00FF66] border-4 border-black shadow-[5px_5px_0px_0px_rgba(0,0,0,1)] mt-4">
-                <i data-lucide="party-popper" class="w-12 h-12 text-black mx-auto mb-3"></i>
+                <i data-lucide="party-popper" class="w-12 h-12 text-black mx-auto mb-3 animate-bounce"></i>
                 <h3 class="font-extrabold text-lg uppercase tracking-tight">Sukses Diperbarui!</h3>
                 <p class="text-sm font-bold text-gray-800 mt-2">Anda sekarang dapat menutup halaman ini dan kembali ke Telegram.</p>
             </div>
@@ -1275,7 +1271,7 @@ const server = http.createServer(async (req, res) => {
                 const vps = db.getVPS(vpsId);
 
                 if (vps && vps.containerId) {
-                    await execPromise(`docker exec ${vps.containerId} bash -c "echo 'root:${password}' | chpasswd || (echo '${password}'; echo '${password}') | passwd root"`);
+                    await execPromise(`docker exec ${vps.containerId} bash -c "echo 'root:${password}' | chpasswd || (echo '${password}'; echo '${password}') | passwd root && service ssh restart || /usr/sbin/sshd -D &"`);
                     vps.password = password;
                     await db.save();
 
