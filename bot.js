@@ -5,6 +5,9 @@ const crypto = require("crypto");
 const { exec } = require("child_process");
 const util = require("util");
 const os = require("os");
+const net = require("net");
+const http = require("http");
+const url = require("url");
 const execPromise = util.promisify(exec);
 
 const TOKEN = "8975199255:AAE0clzEOKDRwyDY09Hka7AG_wRH8MRW1i0";
@@ -12,14 +15,9 @@ const ADMIN_IDS = [7285215691];
 const BOT_IMAGE = "https://www.jaky.dev/portfolio.jpeg";
 const PROVIDER = "☁️ JKSoft Cloud System";
 const DB_FILE = "/data/database.json";
+const WEB_PORT = 3000;
 
-const REGIONS = [
-    { key: "singapore", name: "Singapore", flag: "🇸🇬", location: "1.2897,103.8501", country: "SG", city: "Singapore", timezone: "Asia/Singapore" },
-    { key: "indonesia", name: "Indonesia (Jakarta)", flag: "🇮🇩", location: "-6.2088,106.8456", country: "ID", city: "Jakarta", timezone: "Asia/Jakarta" },
-    { key: "malaysia", name: "Malaysia (Kuala Lumpur)", flag: "🇲🇾", location: "3.1390,101.6869", country: "MY", city: "Kuala Lumpur", timezone: "Asia/Kuala_Lumpur" },
-    { key: "thailand", name: "Thailand (Bangkok)", flag: "🇹🇭", location: "13.7563,100.5018", country: "TH", city: "Bangkok", timezone: "Asia/Bangkok" },
-    { key: "vietnam", name: "Vietnam (Ho Chi Minh)", flag: "🇻🇳", location: "10.8231,106.6297", country: "VN", city: "Ho Chi Minh", timezone: "Asia/Ho_Chi_Minh" }
-];
+const activeTokens = {};
 
 const OS_OPTIONS = [
     { key: "ubuntu22", name: "Ubuntu 22.04 LTS", emoji: "🐧", image: "ubuntu-vps:22.04" },
@@ -67,22 +65,14 @@ class Database {
         await fs.mkdir(path.dirname(DB_FILE), { recursive: true });
         await fs.writeFile(DB_FILE, JSON.stringify(this.data, null, 2));
     }
-    async createVPS(osKey, regionKey, ram, disk, cpu) {
+    async createVPS(osKey, ram, disk, cpu, sshPort, sftpPort, password, ipAddress) {
         const vpsId = crypto.randomBytes(4).toString("hex");
-        const regionData = REGIONS.find(r => r.key === regionKey);
         const osData = OS_OPTIONS.find(o => o.key === osKey);
         const vps = {
             id: vpsId,
             os: osKey,
             osName: osData ? osData.name : osKey,
             osEmoji: osData ? osData.emoji : "🐧",
-            region: regionKey,
-            regionName: regionData ? regionData.name : "Unknown",
-            regionFlag: regionData ? regionData.flag : "🌍",
-            regionLocation: regionData ? regionData.location : "0,0",
-            regionCountry: regionData ? regionData.country : "XX",
-            regionCity: regionData ? regionData.city : "Unknown",
-            regionTimezone: regionData ? regionData.timezone : "UTC",
             ram: ram,
             disk: disk,
             cpu: cpu,
@@ -90,7 +80,11 @@ class Database {
             status: "deploying",
             createdAt: new Date().toISOString(),
             sshCommand: null,
-            containerId: null
+            containerId: null,
+            sshPort: sshPort,
+            sftpPort: sftpPort,
+            password: password,
+            ipAddress: ipAddress
         };
         this.data.vps[vpsId] = vps;
         await this.save();
@@ -127,10 +121,63 @@ class Database {
 const db = new Database();
 const bot = new Telegraf(TOKEN);
 const sessions = {};
+let HOST_PUBLIC_IP = "127.0.0.1";
+
+async function getPublicIP() {
+    try {
+        const { stdout } = await execPromise("curl -s ifconfig.me || curl -s api.ipify.org");
+        if (stdout.trim()) {
+            HOST_PUBLIC_IP = stdout.trim();
+        }
+    } catch {}
+}
+
+function checkPortAvailable(port) {
+    return new Promise((resolve) => {
+        const server = net.createServer();
+        server.once('error', () => resolve(false));
+        server.once('listening', () => {
+            server.close();
+            resolve(true);
+        });
+        server.listen(port);
+    });
+}
+
+async function generateValidPort() {
+    while (true) {
+        const port = crypto.randomInt(10000, 65535);
+        const isAvailable = await checkPortAvailable(port);
+        if (isAvailable) {
+            const vpsList = db.getAllVPS();
+            const conflict = vpsList.some(v => v.sshPort === port || v.sftpPort === port);
+            if (!conflict) {
+                return port;
+            }
+        }
+    }
+}
+
+function generateRandomPassword() {
+    const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const lower = "abcdefghijklmnopqrstuvwxyz";
+    const numbers = "0123456789";
+    const special = "!@#$%^&*()_+-=[]{}|;:,.<>?";
+    const all = upper + lower + numbers + special;
+    let password = "";
+    password += upper[crypto.randomInt(0, upper.length)];
+    password += lower[crypto.randomInt(0, lower.length)];
+    password += numbers[crypto.randomInt(0, numbers.length)];
+    password += special[crypto.randomInt(0, special.length)];
+    for (let i = 0; i < 6; i++) {
+        password += all[crypto.randomInt(0, all.length)];
+    }
+    return password.split('').sort(() => 0.5 - Math.random()).join('');
+}
 
 function getSession(userId) {
     if (!sessions[userId]) {
-        sessions[userId] = { state: "idle", selectedOS: null, selectedRegion: null, selectedRAM: null, selectedDisk: null, selectedCPU: null, selectedVPSId: null };
+        sessions[userId] = { state: "idle", selectedOS: null, selectedRAM: null, selectedDisk: null, selectedCPU: null, selectedVPSId: null };
     }
     return sessions[userId];
 }
@@ -139,20 +186,30 @@ function isAdmin(userId) {
     return ADMIN_IDS.includes(userId);
 }
 
-function getSystemStats() {
+async function getSystemStats() {
     const totalRam = os.totalmem() / (1024 ** 3);
     const freeRam = os.freemem() / (1024 ** 3);
     const usedRam = totalRam - freeRam;
     const cpuLoad = os.loadavg()[0];
     const cpuCount = os.cpus().length;
+    let diskTotal = "N/A", diskUsed = "N/A", diskPercent = "0";
+    try {
+        const { stdout } = await execPromise("df -h / | tail -n 1");
+        const parts = stdout.trim().split(/\s+/);
+        if (parts.length >= 5) {
+            diskTotal = parts[1];
+            diskUsed = parts[2];
+            diskPercent = parts[4].replace("%", "");
+        }
+    } catch {}
     return {
         cpu: Math.min(Math.round((cpuLoad / cpuCount) * 100), 100),
         ram: Math.round((usedRam / totalRam) * 100),
         totalRam: totalRam.toFixed(1),
         usedRam: usedRam.toFixed(1),
-        disk: 15,
-        totalDisk: 320,
-        usedDisk: 48
+        disk: diskPercent,
+        totalDisk: diskTotal,
+        usedDisk: diskUsed
     };
 }
 
@@ -184,7 +241,7 @@ async function getTmateSSH(containerId) {
 
 async function startTmateSession(containerId) {
     try {
-        await execPromise(`docker exec ${containerId} apt update -y && apt install -y tmate 2>/dev/null || true`);
+        await execPromise(`docker exec ${containerId} apt-get update -y && docker exec ${containerId} apt-get install -y tmate 2>/dev/null || true`);
         const result = await getTmateSSH(containerId);
         return result;
     } catch {
@@ -192,30 +249,27 @@ async function startTmateSession(containerId) {
     }
 }
 
-async function injectRegionToContainer(containerId, regionKey) {
-    const region = REGIONS.find(r => r.key === regionKey);
-    if (!region) return;
+async function configureSSHAndSFTP(containerId, password) {
     try {
         await execPromise(`docker exec ${containerId} bash -c "
-            echo '${region.flag} ${region.name}' > /etc/region
-            echo '${region.location}' > /etc/region-location
-            echo '${region.country}' > /etc/region-country
-            echo '${region.city}' > /etc/region-city
-            echo '${region.timezone}' > /etc/region-timezone
-            echo 'export REGION=${regionKey}' >> /root/.bashrc
-            echo 'export REGION_NAME=${region.name}' >> /root/.bashrc
-            echo 'export REGION_FLAG=${region.flag}' >> /root/.bashrc
-            echo 'export REGION_LOCATION=${region.location}' >> /root/.bashrc
-            echo 'export REGION_COUNTRY=${region.country}' >> /root/.bashrc
-            echo 'export REGION_CITY=${region.city}' >> /root/.bashrc
-            echo 'export REGION_TIMEZONE=${region.timezone}' >> /root/.bashrc
-            ln -sf /usr/share/zoneinfo/${region.timezone} /etc/localtime 2>/dev/null || true
-        " 2>/dev/null || true`);
+            apt-get update -y && \
+            apt-get install -y openssh-server -y && \
+            mkdir -p /var/run/sshd && \
+            sed -i 's/#Port 22/Port 22/' /etc/ssh/sshd_config && \
+            echo 'Port 2222' >> /etc/ssh/sshd_config && \
+            sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+            sed -i 's/PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+            echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
+            echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config && \
+            echo 'root:${password}' | chpasswd || (echo '${password}'; echo '${password}') | passwd root && \
+            ssh-keygen -A && \
+            service ssh restart || /usr/sbin/sshd -D &
+        "`);
     } catch {}
 }
 
 async function getDashboardText() {
-    const stats = getSystemStats();
+    const stats = await getSystemStats();
     const vpsList = db.getAllVPS();
     const activeVPS = vpsList.filter(v => v.status === "running").length;
     const uptime = getUptime();
@@ -225,7 +279,7 @@ async function getDashboardText() {
            `🤖 <b>Sistem Uptime:</b> <code>${uptime}</code>\n` +
            `🖥️ <b>CPU Load:</b> <code>${stats.cpu}%</code>\n` +
            `💾 <b>RAM Usage:</b> <code>${stats.usedRam}GB / ${stats.totalRam}GB (${stats.ram}%)</code>\n` +
-           `💿 <b>Disk Usage:</b> <code>${stats.usedDisk}GB / ${stats.totalDisk}GB (${stats.disk}%)</code>\n` +
+           `💿 <b>Disk Usage:</b> <code>${stats.usedDisk} / ${stats.totalDisk} (${stats.disk}%)</code>\n` +
            `━━━━━━━━━━━━━━━━━━━━\n` +
            `📦 <b>Total VPS:</b> <code>${vpsList.length} Unit</code>\n` +
            `🟢 <b>VPS Running:</b> <code>${activeVPS} Unit</code>\n` +
@@ -324,55 +378,14 @@ OS_OPTIONS.forEach((os, osIdx) => {
         const userId = ctx.from.id;
         const session = getSession(userId);
         session.selectedOS = os.key;
-        session.state = "choose_region";
-
-        let text = `<b>🌏 PILIH LOKASI / REGION VPS</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
-        REGIONS.forEach((region, idx) => {
-            text += `${idx + 1}. <b>${region.flag} ${region.name}</b> (<code>${region.key}</code>)\n`;
-        });
-        text += `━━━━━━━━━━━━━━━━━━━━\n`;
-        text += `💿 <b>OS Terpilih:</b> <code>${os.name}</code>\n`;
-        text += `━━━━━━━━━━━━━━━━━━━━\n<i>Silakan pilih nomor lokasi server untuk dideploy.</i>`;
-
-        const buttons = [];
-        let row = [];
-        REGIONS.forEach((reg, idx) => {
-            row.push(Markup.button.callback(`${idx + 1}`, `set_region_${idx}`));
-            if (row.length === 3) {
-                buttons.push(row);
-                row = [];
-            }
-        });
-        if (row.length > 0) buttons.push(row);
-        buttons.push([
-            Markup.button.callback("↩️ Back (Pilih OS)", "create_vps"),
-            Markup.button.callback("📋 Menu Utama", "main_menu")
-        ]);
-
-        await ctx.editMessageCaption(text, {
-            parse_mode: "HTML",
-            ...Markup.inlineKeyboard(buttons)
-        });
-    });
-});
-
-REGIONS.forEach((region, regIdx) => {
-    bot.action(`set_region_${regIdx}`, async (ctx) => {
-        await ctx.answerCbQuery();
-        const userId = ctx.from.id;
-        const session = getSession(userId);
-        session.selectedRegion = region.key;
         session.state = "choose_ram";
-
-        const osData = OS_OPTIONS.find(o => o.key === session.selectedOS);
 
         let text = `<b>💾 PILIH MEMORY / RAM VPS</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
         RAM_OPTIONS.forEach((ram, idx) => {
             text += `${idx + 1}. <b>${ram.name}</b> (<code>${ram.detail}</code>)\n`;
         });
         text += `━━━━━━━━━━━━━━━━━━━━\n`;
-        text += `💿 <b>OS Terpilih:</b> <code>${osData.name}</code>\n`;
-        text += `🌏 <b>Region Terpilih:</b> <code>${region.flag} ${region.name}</code>\n`;
+        text += `💿 <b>OS Terpilih:</b> <code>${os.name}</code>\n`;
         text += `━━━━━━━━━━━━━━━━━━━━\n<i>Silakan pilih nomor kapasitas RAM yang Anda inginkan.</i>`;
 
         const buttons = [];
@@ -386,7 +399,7 @@ REGIONS.forEach((region, regIdx) => {
         });
         if (row.length > 0) buttons.push(row);
         buttons.push([
-            Markup.button.callback("↩️ Back (Pilih Region)", `set_os_${OS_OPTIONS.findIndex(o => o.key === session.selectedOS)}`),
+            Markup.button.callback("↩️ Back (Pilih OS)", "create_vps"),
             Markup.button.callback("📋 Menu Utama", "main_menu")
         ]);
 
@@ -406,7 +419,6 @@ RAM_OPTIONS.forEach((ram, ramIdx) => {
         session.state = "choose_disk";
 
         const osData = OS_OPTIONS.find(o => o.key === session.selectedOS);
-        const regionData = REGIONS.find(r => r.key === session.selectedRegion);
 
         let text = `<b>💿 PILIH KAPASITAS DISK VPS</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
         DISK_OPTIONS.forEach((disk, idx) => {
@@ -414,7 +426,6 @@ RAM_OPTIONS.forEach((ram, ramIdx) => {
         });
         text += `━━━━━━━━━━━━━━━━━━━━\n`;
         text += `💿 <b>OS Terpilih:</b> <code>${osData.name}</code>\n`;
-        text += `🌏 <b>Region Terpilih:</b> <code>${regionData.flag} ${regionData.name}</code>\n`;
         text += `💾 <b>RAM Terpilih:</b> <code>${session.selectedRAM} (${ram.detail})</code>\n`;
         text += `━━━━━━━━━━━━━━━━━━━━\n<i>Silakan pilih nomor kapasitas media penyimpanan SSD.</i>`;
 
@@ -429,7 +440,7 @@ RAM_OPTIONS.forEach((ram, ramIdx) => {
         });
         if (row.length > 0) buttons.push(row);
         buttons.push([
-            Markup.button.callback("↩️ Back (Pilih RAM)", `set_region_${REGIONS.findIndex(r => r.key === session.selectedRegion)}`),
+            Markup.button.callback("↩️ Back (Pilih RAM)", `set_os_${OS_OPTIONS.findIndex(o => o.key === session.selectedOS)}`),
             Markup.button.callback("📋 Menu Utama", "main_menu")
         ]);
 
@@ -449,7 +460,6 @@ DISK_OPTIONS.forEach((disk, diskIdx) => {
         session.state = "choose_cpu";
 
         const osData = OS_OPTIONS.find(o => o.key === session.selectedOS);
-        const regionData = REGIONS.find(r => r.key === session.selectedRegion);
         const ramData = RAM_OPTIONS.find(rm => rm.name === session.selectedRAM);
 
         let text = `<b>⚡ PILIH CORE CPU VPS</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
@@ -458,7 +468,6 @@ DISK_OPTIONS.forEach((disk, diskIdx) => {
         });
         text += `━━━━━━━━━━━━━━━━━━━━\n`;
         text += `💿 <b>OS Terpilih:</b> <code>${osData.name}</code>\n`;
-        text += `🌏 <b>Region Terpilih:</b> <code>${regionData.flag} ${regionData.name}</code>\n`;
         text += `💾 <b>RAM Terpilih:</b> <code>${session.selectedRAM} (${ramData.detail})</code>\n`;
         text += `💿 <b>Disk Terpilih:</b> <code>${session.selectedDisk}</code>\n`;
         text += `━━━━━━━━━━━━━━━━━━━━\n<i>Silakan pilih nomor alokasi virtual core processor.</i>`;
@@ -494,12 +503,10 @@ CPU_OPTIONS.forEach((cpu, cpuIdx) => {
         session.state = "confirm_vps";
 
         const osData = OS_OPTIONS.find(o => o.key === session.selectedOS);
-        const regionData = REGIONS.find(r => r.key === session.selectedRegion);
         const ramData = RAM_OPTIONS.find(rm => rm.name === session.selectedRAM);
 
         let text = `<b>⚠️ KONFIRMASI PEMBUATAN VPS</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
                    `💿 <b>Sistem Operasi:</b> <code>${osData.emoji} ${osData.name}</code>\n` +
-                   `🌏 <b>Region Server:</b> <code>${regionData.flag} ${regionData.name}</code>\n` +
                    `💾 <b>Alokasi RAM:</b> <code>${session.selectedRAM} (${ramData.detail})</code>\n` +
                    `💿 <b>Kapasitas Disk:</b> <code>${session.selectedDisk}</code>\n` +
                    `⚡ <b>Inti Processor:</b> <code>${session.selectedCPU}</code>\n` +
@@ -531,29 +538,43 @@ bot.action("execute_deploy", async (ctx) => {
     session.state = "deploying";
 
     const osData = OS_OPTIONS.find(o => o.key === session.selectedOS);
-    const regionData = REGIONS.find(r => r.key === session.selectedRegion);
 
     await ctx.editMessageCaption(
         `<b>⏳ SEDANG MEMBANGUN VPS...</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
         `💿 <b>OS:</b> <code>${osData.name}</code>\n` +
-        `🌏 <b>Region:</b> <code>${regionData.flag} ${regionData.name}</code>\n` +
         `💾 <b>RAM:</b> <code>${session.selectedRAM}</code>\n` +
         `💿 <b>Disk:</b> <code>${session.selectedDisk}</code>\n` +
         `⚡ <b>CPU:</b> <code>${session.selectedCPU}</code>\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
-        `<i>Sistem sedang menyiapkan container docker dan menginstalasi modul pendukung. Harap tunggu sebentar...</i>`,
+        `<i>Sistem sedang menyiapkan container docker, menghasilkan port acak baru, dan menginstalasi modul pendukung. Harap tunggu sebentar...</i>`,
         { parse_mode: "HTML" }
     );
 
     try {
-        const vps = await db.createVPS(session.selectedOS, session.selectedRegion, session.selectedRAM, session.selectedDisk, session.selectedCPU);
-        const cmd = `docker run -d --name vps_${vps.id} --privileged ${osData.image}`;
+        const sshPort = await generateValidPort();
+        const sftpPort = await generateValidPort();
+        const password = generateRandomPassword();
+        await getPublicIP();
+
+        const vps = await db.createVPS(
+            session.selectedOS,
+            session.selectedRAM,
+            session.selectedRAM,
+            session.selectedDisk,
+            session.selectedCPU,
+            sshPort,
+            sftpPort,
+            password,
+            HOST_PUBLIC_IP
+        );
+
+        const cmd = `docker run -d --name vps_${vps.id} -p ${sshPort}:22 -p ${sftpPort}:2222 --privileged ${osData.image}`;
         const { stdout } = await execPromise(cmd);
         vps.containerId = stdout.trim();
         vps.status = "running";
         await db.save();
 
-        await injectRegionToContainer(vps.containerId, session.selectedRegion);
+        await configureSSHAndSFTP(vps.containerId, password);
         const sshCommand = await startTmateSession(vps.containerId);
 
         if (sshCommand) {
@@ -563,15 +584,20 @@ bot.action("execute_deploy", async (ctx) => {
             let successText = `<b>✅ VPS BERHASIL DIDEPLOY!</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
                               `🆔 <b>ID VPS:</b> <code>${vps.id}</code>\n` +
                               `💿 <b>OS:</b> <code>${osData.emoji} ${osData.name}</code>\n` +
-                              `🌏 <b>Lokasi:</b> <code>${regionData.flag} ${regionData.name}</code>\n` +
                               `💾 <b>RAM:</b> <code>${session.selectedRAM}</code>\n` +
                               `💿 <b>Disk:</b> <code>${session.selectedDisk}</code>\n` +
                               `⚡ <b>CPU:</b> <code>${session.selectedCPU}</code>\n` +
                               `🟢 <b>Status:</b> <code>Running</code>\n` +
                               `━━━━━━━━━━━━━━━━━━━━\n` +
-                              `🔑 <b>SSH (Tmate Command):</b>\n<code>${sshCommand}</code>\n` +
+                              `🔑 <b>METODE 1: SSH (Tmate Command):</b>\n<code>${sshCommand}</code>\n\n` +
+                              `🌐 <b>METODE 2: DIRECT IP VPS:</b>\n` +
+                              `🖥️ <b>IP Host:</b> <code>${HOST_PUBLIC_IP}</code>\n` +
+                              `🔌 <b>Port SSH:</b> <code>${sshPort}</code>\n` +
+                              `📂 <b>Port SFTP:</b> <code>${sftpPort}</code>\n` +
+                              `👤 <b>Username:</b> <code>root</code>\n` +
+                              `🔑 <b>Password:</b> <code>${password}</code>\n` +
                               `━━━━━━━━━━━━━━━━━━━━\n` +
-                              `<i>Gunakan perintah SSH di atas untuk mengakses VPS Anda sekarang.</i>`;
+                              `<i>Gunakan salah satu metode di atas untuk mengakses VPS Anda sekarang.</i>`;
 
             await ctx.editMessageCaption(successText, {
                 parse_mode: "HTML",
@@ -584,8 +610,13 @@ bot.action("execute_deploy", async (ctx) => {
             await ctx.editMessageCaption(
                 `<b>⚠️ VPS BERHASIL DIBUAT DENGAN LIMITASI</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
                 `Container berhasil jalan namun sistem gagal mendapatkan SSH Tmate secara otomatis.\n` +
-                `Silakan lakukan regenerasi SSH pada menu management.\n\n` +
-                `🆔 <b>ID VPS:</b> <code>${vps.id}</code>`,
+                `Namun, Anda masih bisa login via Direct IP VPS.\n\n` +
+                `🆔 <b>ID VPS:</b> <code>${vps.id}</code>\n` +
+                `🖥️ <b>IP Host:</b> <code>${HOST_PUBLIC_IP}</code>\n` +
+                `🔌 <b>Port SSH:</b> <code>${sshPort}</code>\n` +
+                `📂 <b>Port SFTP:</b> <code>${sftpPort}</code>\n` +
+                `👤 <b>Username:</b> <code>root</code>\n` +
+                `🔑 <b>Password:</b> <code>${password}</code>`,
                 {
                     parse_mode: "HTML",
                     ...Markup.inlineKeyboard([
@@ -632,8 +663,7 @@ bot.action("list_vps", async (ctx) => {
         const osData = OS_OPTIONS.find(o => o.key === vps.os);
         const statusEmoji = vps.status === "running" ? "🟢" : "🔴";
         text += `${index + 1}. <b>${statusEmoji} ID: <code>${vps.id}</code></b>\n` +
-                `   ├ 📦 OS: <code>${osData ? osData.name : vps.os}</code>\n` +
-                `   └ 🌏 Region: <code>${vps.regionFlag} ${vps.regionName}</code>\n\n`;
+                `   └ 📦 OS: <code>${osData ? osData.name : vps.os}</code>\n\n`;
     });
     text += `━━━━━━━━━━━━━━━━━━━━\n<i>Pilih nomor di bawah ini untuk mengelola VPS Anda secara spesifik.</i>`;
 
@@ -680,7 +710,7 @@ async function renderVPSManagement(ctx, vpsId, isRefresh = false) {
     }
 
     let dockerStats = { cpu: "0.00%", memory: "0MB / 0MB", memPercent: "0.00%" };
-    if (vps.containerId) {
+    if (vps.containerId && vps.status === "running") {
         try {
             const { stdout } = await execPromise(`docker stats --no-stream --format "{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}" ${vps.containerId} 2>/dev/null || echo "0%|0B/0B|0%"`);
             const parts = stdout.trim().split("|");
@@ -699,7 +729,6 @@ async function renderVPSManagement(ctx, vpsId, isRefresh = false) {
                `━━━━━━━━━━━━━━━━━━━━\n` +
                `🟢 <b>Status Server:</b> <code>${statusText}</code>\n` +
                `💿 <b>OS Variant:</b> <code>${vps.osEmoji} ${vps.osName}</code>\n` +
-               `🌏 <b>Region Server:</b> <code>${vps.regionFlag} ${vps.regionName}</code>\n` +
                `💾 <b>Alokasi RAM:</b> <code>${vps.ram || "2GB"}</code>\n` +
                `💿 <b>Kapasitas Disk:</b> <code>${vps.disk || "64GB"}</code>\n` +
                `⚡ <b>Inti Processor:</b> <code>${vps.cpu || "1 Core"}</code>\n` +
@@ -709,14 +738,24 @@ async function renderVPSManagement(ctx, vpsId, isRefresh = false) {
                `├ <b>CPU Core Usage:</b> <code>${dockerStats.cpu}</code>\n` +
                `└ <b>RAM Virtual Usage:</b> <code>${dockerStats.memory} (${dockerStats.memPercent})</code>\n` +
                `━━━━━━━━━━━━━━━━━━━━\n` +
-               `🔑 <b>SSH (Tmate Command):</b>\n` +
-               `<code>${vps.sshCommand || "Belum Dibuat / Regenerasikan"}</code>\n` +
+               `🔑 <b>METODE 1: SSH (Tmate Command):</b>\n` +
+               `<code>${vps.sshCommand || "Belum Dibuat / Regenerasikan"}</code>\n\n` +
+               `🌐 <b>METODE 2: DIRECT IP VPS:</b>\n` +
+               `🖥️ <b>IP Host:</b> <code>${vps.ipAddress || HOST_PUBLIC_IP}</code>\n` +
+               `🔌 <b>Port SSH:</b> <code>${vps.sshPort || "N/A"}</code>\n` +
+               `📂 <b>Port SFTP:</b> <code>${vps.sftpPort || "N/A"}</code>\n` +
+               `👤 <b>Username:</b> <code>root</code>\n` +
+               `🔑 <b>Password:</b> <code>${vps.password || "N/A"}</code>\n` +
                `━━━━━━━━━━━━━━━━━━━━\n` +
                `<i>Update real-time resource VPS Anda dengan menekan tombol refresh.</i>`;
 
     const buttons = [
         [
             Markup.button.callback("🔄 Refresh Info", `refresh_vps_${vps.id}`),
+            Markup.button.callback("🌀 Reboot VPS", `reboot_vps_${vps.id}`)
+        ],
+        [
+            Markup.button.callback("⚙️ Settings VPS", `settings_vps_${vps.id}`),
             Markup.button.callback("🔑 Regen SSH", `regen_ssh_${vps.id}`)
         ],
         [
@@ -727,23 +766,98 @@ async function renderVPSManagement(ctx, vpsId, isRefresh = false) {
         ]
     ];
 
-    if (isRefresh) {
-        await ctx.editMessageCaption(text, {
-            parse_mode: "HTML",
-            ...Markup.inlineKeyboard(buttons)
-        });
-    } else {
-        await ctx.editMessageCaption(text, {
-            parse_mode: "HTML",
-            ...Markup.inlineKeyboard(buttons)
-        });
-    }
+    await ctx.editMessageCaption(text, {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard(buttons)
+    });
 }
 
 bot.action(/^refresh_vps_(.+)$/, async (ctx) => {
     const vpsId = ctx.match[1];
     await ctx.answerCbQuery("Status Kontainer Diperbarui!");
     await renderVPSManagement(ctx, vpsId, true);
+});
+
+bot.action(/^reboot_vps_(.+)$/, async (ctx) => {
+    const vpsId = ctx.match[1];
+    await ctx.answerCbQuery("Sedang me-reboot VPS...");
+    const vps = db.getVPS(vpsId);
+
+    if (!vps || !vps.containerId) {
+        return ctx.reply("❌ Kontainer tidak valid.");
+    }
+
+    await ctx.editMessageCaption(
+        `<b>🌀 SEDANG ME-REBOOT VPS...</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
+        `🆔 <b>ID VPS:</b> <code>${vps.id}</code>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `<i>Sedang melakukan restart aman pada container Docker, mengkonfigurasi ulang SSH, dan mengaktifkan sesi Tmate baru. Harap tunggu...</i>`,
+        { parse_mode: "HTML" }
+    );
+
+    try {
+        await execPromise(`docker restart ${vps.containerId}`);
+        await configureSSHAndSFTP(vps.containerId, vps.password);
+        const sshCommand = await startTmateSession(vps.containerId);
+        if (sshCommand) {
+            vps.sshCommand = sshCommand;
+            await db.save();
+        }
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        await renderVPSManagement(ctx, vpsId);
+    } catch (err) {
+        await ctx.editMessageCaption(
+            `<b>❌ GAGAL REBOOT VPS</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
+            `<code>${err.message}</code>`,
+            {
+                parse_mode: "HTML",
+                ...Markup.inlineKeyboard([[Markup.button.callback("↩️ Kembali ke Panel VPS", `manage_vps_${vps.id}`)]])
+            }
+        );
+    }
+});
+
+bot.action(/^settings_vps_(.+)$/, async (ctx) => {
+    const vpsId = ctx.match[1];
+    await ctx.answerCbQuery();
+    const vps = db.getVPS(vpsId);
+
+    if (!vps) {
+        return ctx.editMessageCaption(
+            `<b>❌ VPS TIDAK DITEMUKAN</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
+            `Data VPS tidak valid atau sudah dihapus.`,
+            {
+                parse_mode: "HTML",
+                ...Markup.inlineKeyboard([[Markup.button.callback("📋 Kembali", "list_vps")]])
+            }
+        );
+    }
+
+    const token = crypto.randomBytes(16).toString("hex");
+    activeTokens[token] = { vpsId: vps.id, userId: ctx.from.id, createdAt: Date.now() };
+
+    await getPublicIP();
+    const resetUrl = `http://${HOST_PUBLIC_IP}:${WEB_PORT}/reset?token=${token}`;
+
+    let text = `<b>⚙️ SETTINGS VPS: <code>${vps.id}</code></b>\n` +
+               `━━━━━━━━━━━━━━━━━━━━\n` +
+               `Silakan pilih opsi konfigurasi untuk kontainer Anda:\n\n` +
+               `🔑 <b>Reset Password:</b> Membuka popup Web App untuk menginput password baru secara visual.\n` +
+               `🔄 <b>Kembali:</b> Kembali ke menu dashboard manajemen VPS Anda.`;
+
+    const buttons = [
+        [
+            Markup.button.webApp("🔑 Reset Password", resetUrl)
+        ],
+        [
+            Markup.button.callback("↩️ Kembali ke Dashboard VPS", `manage_vps_${vps.id}`)
+        ]
+    ];
+
+    await ctx.editMessageCaption(text, {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard(buttons)
+    });
 });
 
 bot.action(/^regen_ssh_(.+)$/, async (ctx) => {
@@ -815,7 +929,6 @@ bot.action(/^confirm_delete_vps_(.+)$/, async (ctx) => {
                `Anda akan menghapus VPS berikut:\n` +
                `🆔 <b>ID VPS:</b> <code>${vps.id}</code>\n` +
                `💿 <b>OS:</b> <code>${vps.osEmoji} ${vps.osName}</code>\n` +
-               `🌏 <b>Region:</b> <code>${vps.regionFlag} ${vps.regionName}</code>\n` +
                `💾 <b>RAM:</b> <code>${vps.ram || "2GB"}</code>\n` +
                `💿 <b>Disk:</b> <code>${vps.disk || "64GB"}</code>\n` +
                `⚡ <b>CPU:</b> <code>${vps.cpu || "1 Core"}</code>\n` +
@@ -871,11 +984,338 @@ bot.catch((err) => {
     console.error("Fatal Bot error:", err);
 });
 
+function getWebPageHTML(vpsId, userId, token, isValid) {
+    return `<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reset Password VPS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700;800&display=swap" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f0f0f0;
+            background-image: radial-gradient(#000000 1.5px, #f0f0f0 1.5px);
+            background-size: 20px 20px;
+            font-family: 'Space Grotesk', sans-serif;
+            color: #000000;
+        }
+        .neo-card {
+            border: 4px solid #000000;
+            box-shadow: 8px 8px 0px 0px #000000;
+            background-color: #ffffff;
+            transition: all 0.2s ease;
+        }
+        .neo-card-success {
+            border: 4px solid #000000;
+            box-shadow: 8px 8px 0px 0px #000000;
+            background-color: #ffffff;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .neo-card-success:hover {
+            transform: translate(-4px, -4px);
+            box-shadow: 12px 12px 0px 0px #000000;
+        }
+        .neo-input {
+            border: 3px solid #000000;
+            background-color: #ffffff;
+            transition: transform 0.1s ease, box-shadow 0.1s ease;
+        }
+        .neo-input:focus {
+            outline: none;
+            box-shadow: 4px 4px 0px 0px #000000;
+            background-color: #feffd9;
+        }
+        .neo-btn {
+            border: 3px solid #000000;
+            box-shadow: 5px 5px 0px 0px #000000;
+            transition: all 0.15s ease-in-out;
+        }
+        .neo-btn:hover {
+            transform: translate(-2px, -2px);
+            box-shadow: 7px 7px 0px 0px #000000;
+        }
+        .neo-btn:active {
+            transform: translate(3px, 3px);
+            box-shadow: 2px 2px 0px 0px #000000;
+        }
+        .neo-toast {
+            border: 4px solid #000000;
+            box-shadow: 6px 6px 0px 0px #000000;
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+    </style>
+</head>
+<body class="p-4 flex flex-col justify-between min-h-screen">
+
+    <div id="customToast" class="fixed top-4 left-1/2 -translate-x-1/2 z-50 p-4 neo-toast font-black flex items-center space-x-3 hidden transform -translate-y-20 opacity-0">
+        <div id="toastIcon"></div>
+        <span id="toastText" class="text-sm"></span>
+    </div>
+
+    <div class="w-full max-w-md mx-auto my-auto">
+        ${isValid ? `
+        <div class="neo-card p-6 md:p-8 rounded-none relative">
+            <div class="absolute -top-4 -left-4 bg-[#FF4F81] border-4 border-black text-white px-4 py-1 font-extrabold text-sm uppercase tracking-wider shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
+                SECURITY
+            </div>
+            
+            <div class="text-center mt-4 mb-8">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-none bg-[#00FF66] border-4 border-black mb-4 shadow-[4px_4px_0px_0px_#000000] text-black">
+                    <i data-lucide="shield-alert" class="w-8 h-8"></i>
+                </div>
+                <h2 class="text-2xl font-extrabold tracking-tight uppercase">Reset Password</h2>
+                <p class="text-sm font-bold text-gray-700 mt-2 bg-[#A0E9FF] border-2 border-black inline-block px-3 py-1">
+                    ID VPS: <span class="font-mono text-black font-extrabold">${vpsId}</span>
+                </p>
+            </div>
+
+            <form id="resetForm" class="space-y-6" onsubmit="event.preventDefault(); submitReset();">
+                <div class="relative">
+                    <label class="block text-xs font-black uppercase tracking-wider mb-2 text-black">Password Baru</label>
+                    <div class="relative">
+                        <span class="absolute left-4 top-1/2 -translate-y-1/2 z-20 flex items-center justify-center pointer-events-none">
+                            <i data-lucide="key-round" class="w-5 h-5 text-black"></i>
+                        </span>
+                        <input type="password" id="newPassword" class="neo-input w-full pl-12 pr-12 py-3.5 text-sm font-mono font-bold text-black" placeholder="Password baru..." required>
+                        <button type="button" onclick="toggleVisibility('newPassword', 'eyeOn1', 'eyeOff1')" class="absolute right-4 top-1/2 -translate-y-1/2 z-20 flex items-center justify-center text-black hover:scale-115 active:scale-95 transition-transform bg-transparent border-0 focus:outline-none">
+                            <span id="eyeOff1" class="flex"><i data-lucide="eye-off" class="w-5 h-5"></i></span>
+                            <span id="eyeOn1" class="hidden"><i data-lucide="eye" class="w-5 h-5"></i></span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="relative">
+                    <label class="block text-xs font-black uppercase tracking-wider mb-2 text-black">Ulangi Password</label>
+                    <div class="relative">
+                        <span class="absolute left-4 top-1/2 -translate-y-1/2 z-20 flex items-center justify-center pointer-events-none">
+                            <i data-lucide="key-round" class="w-5 h-5 text-black"></i>
+                        </span>
+                        <input type="password" id="confirmPassword" class="neo-input w-full pl-12 pr-12 py-3.5 text-sm font-mono font-bold text-black" placeholder="Ulangi password..." required>
+                        <button type="button" onclick="toggleVisibility('confirmPassword', 'eyeOn2', 'eyeOff2')" class="absolute right-4 top-1/2 -translate-y-1/2 z-20 flex items-center justify-center text-black hover:scale-115 active:scale-95 transition-transform bg-transparent border-0 focus:outline-none">
+                            <span id="eyeOff2" class="flex"><i data-lucide="eye-off" class="w-5 h-5"></i></span>
+                            <span id="eyeOn2" class="hidden"><i data-lucide="eye" class="w-5 h-5"></i></span>
+                        </button>
+                    </div>
+                </div>
+
+                <button type="submit" id="submitBtn" class="neo-btn w-full bg-[#FFD214] text-black font-extrabold py-3.5 px-4 rounded-none uppercase tracking-wider flex items-center justify-center space-x-2 text-sm">
+                    <i data-lucide="check-circle-2" class="w-5 h-5"></i>
+                    <span>Perbarui Password</span>
+                </button>
+            </form>
+
+            <div id="successCard" class="hidden text-center p-6 bg-[#00FF66] border-4 border-black shadow-[5px_5px_0px_0px_rgba(0,0,0,1)] mt-4">
+                <i data-lucide="party-popper" class="w-12 h-12 text-black mx-auto mb-3"></i>
+                <h3 class="font-extrabold text-lg uppercase tracking-tight">Sukses Diperbarui!</h3>
+                <p class="text-sm font-bold text-gray-800 mt-2">Anda sekarang dapat menutup halaman ini dan kembali ke Telegram.</p>
+            </div>
+        </div>
+        ` : `
+        <div class="neo-card-success p-6 md:p-8 rounded-none relative">
+            <div class="absolute -top-4 -left-4 bg-[#00FF66] border-4 border-black text-black px-4 py-1 font-extrabold text-sm uppercase tracking-wider shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]">
+                INFO SYSTEM
+            </div>
+            <div class="text-center mt-4">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-none bg-[#FFD214] border-4 border-black mb-4 shadow-[4px_4px_0px_0px_#000000] text-black">
+                    <i data-lucide="shield-check" class="w-8 h-8"></i>
+                </div>
+                <h2 class="text-2xl font-extrabold tracking-tight uppercase">Sesi Selesai</h2>
+                <div class="p-4 bg-[#A0E9FF] border-3 border-black text-left mt-6 font-bold text-sm leading-relaxed shadow-[3px_3px_0px_0px_#000000]">
+                    Password berhasil diganti / Token reset ini telah digunakan atau tidak valid.<br><br>
+                    Silakan kembali ke Telegram dan gunakan password baru Anda untuk masuk ke VPS.
+                </div>
+                <button onclick="window.Telegram.WebApp.close();" class="neo-btn mt-6 w-full bg-[#FF4F81] text-white font-extrabold py-3 px-4 rounded-none uppercase tracking-wider flex items-center justify-center space-x-2 text-sm">
+                    <i data-lucide="log-out" class="w-5 h-5"></i>
+                    <span>Keluar Web App</span>
+                </button>
+            </div>
+        </div>
+        `}
+    </div>
+
+    <p class="text-center font-extrabold text-xs uppercase tracking-widest text-black mt-8 bg-white border-2 border-black py-2 inline-block mx-auto px-4 shadow-[3px_3px_0px_0px_#000000]">
+        Sistem Enkripsi • ${PROVIDER}
+    </p>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.ready();
+        tg.expand();
+        lucide.createIcons();
+
+        function showToast(message, type = 'error') {
+            const toast = document.getElementById('customToast');
+            const toastText = document.getElementById('toastText');
+            const toastIcon = document.getElementById('toastIcon');
+            
+            toastText.innerText = message;
+            toast.className = "fixed top-4 left-1/2 -translate-x-1/2 z-50 p-4 neo-toast font-black flex items-center space-x-3 rounded-none transform transition-all duration-300";
+            
+            if (type === 'success') {
+                toast.classList.add('bg-[#00FF66]');
+                toastIcon.innerHTML = '<i data-lucide="check-circle" class="w-6 h-6 text-black"></i>';
+            } else {
+                toast.classList.add('bg-[#FF4F81]');
+                toastIcon.innerHTML = '<i data-lucide="alert-triangle" class="w-6 h-6 text-black"></i>';
+            }
+            lucide.createIcons();
+            
+            toast.classList.remove('hidden', '-translate-y-20', 'opacity-0');
+            toast.classList.add('translate-y-0', 'opacity-100');
+            
+            setTimeout(() => {
+                toast.classList.remove('translate-y-0', 'opacity-100');
+                toast.classList.add('-translate-y-20', 'opacity-0');
+                setTimeout(() => toast.classList.add('hidden'), 300);
+            }, 3000);
+        }
+
+        function toggleVisibility(inputId, eyeOnId, eyeOffId) {
+            const input = document.getElementById(inputId);
+            const eyeOn = document.getElementById(eyeOnId);
+            const eyeOff = document.getElementById(eyeOffId);
+            if (input.type === "password") {
+                input.type = "text";
+                eyeOn.classList.remove("hidden");
+                eyeOff.classList.add("hidden");
+            } else {
+                input.type = "password";
+                eyeOn.classList.add("hidden");
+                eyeOff.classList.remove("hidden");
+            }
+        }
+
+        async function submitReset() {
+            const pass = document.getElementById("newPassword").value;
+            const confirm = document.getElementById("confirmPassword").value;
+            const submitBtn = document.getElementById("submitBtn");
+            const form = document.getElementById("resetForm");
+            const successCard = document.getElementById("successCard");
+
+            if (pass.length < 8) {
+                showToast("Password minimal terdiri dari 8 karakter!", "error");
+                return;
+            }
+
+            if (pass !== confirm) {
+                showToast("Konfirmasi password tidak cocok!", "error");
+                return;
+            }
+
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i data-lucide="loader" class="w-5 h-5 animate-spin"></i><span>Memproses...</span>';
+            lucide.createIcons();
+
+            try {
+                const response = await fetch("/api/reset-password", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        token: "${token}",
+                        password: pass
+                    })
+                });
+                const resData = await response.json();
+                if (resData.success) {
+                    showToast("Password berhasil diperbarui!", "success");
+                    form.classList.add("hidden");
+                    successCard.classList.remove("hidden");
+                    setTimeout(() => {
+                        tg.close();
+                    }, 3000);
+                } else {
+                    showToast("Gagal memproses: " + (resData.error || "Unknown"), "error");
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = '<i data-lucide="check-circle-2" class="w-5 h-5"></i><span>Perbarui Password</span>';
+                    lucide.createIcons();
+                }
+            } catch (err) {
+                showToast("Gagal menghubungkan ke server!", "error");
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i data-lucide="check-circle-2" class="w-5 h-5"></i><span>Perbarui Password</span>';
+                lucide.createIcons();
+            }
+        }
+    </script>
+</body>
+</html>`;
+}
+
+const server = http.createServer(async (req, res) => {
+    const parsedUrl = url.parse(req.url, true);
+    if (parsedUrl.pathname === "/reset") {
+        const { token } = parsedUrl.query;
+        const tokenData = activeTokens[token];
+        
+        if (tokenData) {
+            res.writeHead(200, { "Content-Type": "text/html" });
+            res.end(getWebPageHTML(tokenData.vpsId, tokenData.userId, token, true));
+        } else {
+            res.writeHead(200, { "Content-Type": "text/html" });
+            res.end(getWebPageHTML("", "", "", false));
+        }
+    } else if (parsedUrl.pathname === "/api/reset-password" && req.method === "POST") {
+        let body = "";
+        req.on("data", chunk => body += chunk);
+        req.on("end", async () => {
+            try {
+                const { token, password } = JSON.parse(body);
+                const tokenData = activeTokens[token];
+
+                if (!tokenData) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    return res.end(JSON.stringify({ success: false, error: "Sesi token tidak valid atau kedaluwarsa." }));
+                }
+
+                const { vpsId, userId } = tokenData;
+                const vps = db.getVPS(vpsId);
+
+                if (vps && vps.containerId) {
+                    await execPromise(`docker exec ${vps.containerId} bash -c "echo 'root:${password}' | chpasswd || (echo '${password}'; echo '${password}') | passwd root"`);
+                    vps.password = password;
+                    await db.save();
+
+                    delete activeTokens[token];
+
+                    await bot.telegram.sendMessage(userId, `<b>🔑 PASSWORD VPS DIRESET!</b>\n━━━━━━━━━━━━━━━━━━━━\n🆔 <b>ID VPS:</b> <code>${vpsId}</code>\n🔑 <b>Password Baru:</b> <code>${password}</code>\n━━━━━━━━━━━━━━━━━━━━`, { parse_mode: "HTML" });
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ success: true }));
+                } else {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ success: false, error: "VPS target tidak ditemukan" }));
+                }
+            } catch (err) {
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ success: false, error: err.message }));
+            }
+        });
+    } else {
+        res.writeHead(404);
+        res.end();
+    }
+});
+
 (async () => {
     await db.load();
+    await getPublicIP();
+    
+    server.listen(WEB_PORT, "0.0.0.0", () => {
+        console.log(`📡 Built-in Webapp Server listening on http://0.0.0.0:${WEB_PORT}`);
+    });
+
     await bot.launch();
     console.log("🚀 JKSoft-VpsFree (Owner Version) Berhasil dijalankan!");
 })();
 
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
+process.once("SIGINT", () => {
+    server.close();
+    bot.stop("SIGINT");
+});
+process.once("SIGTERM", () => {
+    server.close();
+    bot.stop("SIGTERM");
+});
